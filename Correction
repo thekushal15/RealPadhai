@@ -1,0 +1,38 @@
+# STEP 4: Visualize All Tenors with Spread and Error Summary
+tenors = list(tenor_map.keys())
+fig, axes = plt.subplots(nrows=4, ncols=3, figsize=(20, 14), sharex=True)
+axes = axes.flatten()
+
+spread_matrix = []
+
+for i, tenor in enumerate(tenors):
+    ax = axes[i]
+    actual = y_test[:, i]
+    predicted = dl_preds[:, i]
+    spread = actual - predicted
+    spread_matrix.append(spread)
+
+    ax.plot(dates_test, actual, label='Actual', linewidth=1.5)
+    ax.plot(dates_test, predicted, label='Predicted', linestyle='--', linewidth=1.5)
+    ax.fill_between(dates_test, actual, predicted, color='gray', alpha=0.3, label='Spread')
+    ax.set_title(f"{tenor} Tenor")
+    ax.grid(True)
+
+    # Show only once to avoid repetition
+    if i == 0:
+        ax.legend()
+
+plt.tight_layout()
+plt.show()
+
+# Add spread summary plot at the bottom
+plt.figure(figsize=(20, 4))
+for i, tenor in enumerate(tenors):
+    plt.plot(dates_test, spread_matrix[i], label=f"{tenor}")
+plt.title("Prediction Spread (Actual - Predicted) per Tenor")
+plt.axhline(0, color='black', linestyle='--')
+plt.ylabel("Spread")
+plt.legend(loc='upper right', ncol=6)
+plt.grid(True)
+plt.tight_layout()
+plt.show()
