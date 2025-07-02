@@ -61,3 +61,35 @@ plt.legend(loc='upper right', ncol=6)
 plt.grid(True)
 plt.tight_layout()
 plt.show()
+
+
+
+
+
+
+
+
+
+
+# STEP 4 (Updated): One Big Plot per Tenor Sequentially
+tenors = list(tenor_map.keys())
+spread_matrix = []
+
+for i, tenor in enumerate(tenors):
+    actual = y_full_seq[:, i]
+    predicted = dl_preds_full[:, i]
+    spread = actual - predicted
+    spread_matrix.append(spread)
+
+    plt.figure(figsize=(22, 6))  # Bigger width and height
+    plt.plot(dates_full_seq, actual, label='Actual', linewidth=1.8)
+    plt.plot(dates_full_seq, predicted, label='Predicted', linestyle='--', linewidth=1.8)
+    plt.fill_between(dates_full_seq, actual, predicted, color='gray', alpha=0.3, label='Spread')
+    plt.title(f"{tenor} Tenor - Actual vs Predicted")
+    plt.ylabel("Rate")
+    plt.xlabel("Date")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+
