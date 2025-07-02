@@ -1,35 +1,60 @@
-# STEP 4: Visualize All Tenors with Spread and Error Summary
+# Recombine full data for complete prediction
+X_full_seq = []
+y_full_seq = []
+dates_full_seq = []
+for i in range(SEQUENCE_LENGTH, len(X)):
+    X_full_seq.append(X.iloc[i - SEQUENCE_LENGTH:i].values)
+    y_full_seq.append(y.iloc[i].values)
+    dates_full_seq.append(X.index[i])
+
+X_full_seq = np.array(X_full_seq)
+y_full_seq = np.array(y_full_seq)
+dates_full_seq = np.array(dates_full_seq)
+
+# Scale full input and target
+X_full_reshaped = X_full_seq.reshape(-1, X_full_seq.shape[-1])
+X_full_scaled = feature_scaler.fit_transform(X_full_reshaped).reshape(X_full_seq.shape)
+y_full_scaled = target_scaler.fit_transform(y_full_seq)
+
+# Predict using trained model
+dl_preds_full_scaled = best_model.predict(X_full_scaled)
+dl_preds_full = target_scaler.inverse_transform(dl_preds_full_scaled)
+
+# Metrics
+full_mse = mean_squared_error(y_full_seq, dl_preds_full)
+full_r2 = r2_score(y_full_seq, dl_preds_full)
+print(f"Full Dataset - MSE: {full_mse:.4f}, R2: {full_r2:.4f}")
+
+# Visualize per tenor with full 4000-row coverage
 tenors = list(tenor_map.keys())
 fig, axes = plt.subplots(nrows=4, ncols=3, figsize=(20, 14), sharex=True)
 axes = axes.flatten()
-
 spread_matrix = []
 
 for i, tenor in enumerate(tenors):
     ax = axes[i]
-    actual = y_test[:, i]
-    predicted = dl_preds[:, i]
+    actual = y_full_seq[:, i]
+    predicted = dl_preds_full[:, i]
     spread = actual - predicted
     spread_matrix.append(spread)
 
-    ax.plot(dates_test, actual, label='Actual', linewidth=1.5)
-    ax.plot(dates_test, predicted, label='Predicted', linestyle='--', linewidth=1.5)
-    ax.fill_between(dates_test, actual, predicted, color='gray', alpha=0.3, label='Spread')
+    ax.plot(dates_full_seq, actual, label='Actual', linewidth=1.2)
+    ax.plot(dates_full_seq, predicted, label='Predicted', linestyle='--', linewidth=1.2)
+    ax.fill_between(dates_full_seq, actual, predicted, color='gray', alpha=0.3)
     ax.set_title(f"{tenor} Tenor")
     ax.grid(True)
 
-    # Show only once to avoid repetition
     if i == 0:
         ax.legend()
 
 plt.tight_layout()
 plt.show()
 
-# Add spread summary plot at the bottom
-plt.figure(figsize=(20, 4))
+# Combined Spread Plot for All Tenors
+plt.figure(figsize=(20, 5))
 for i, tenor in enumerate(tenors):
-    plt.plot(dates_test, spread_matrix[i], label=f"{tenor}")
-plt.title("Prediction Spread (Actual - Predicted) per Tenor")
+    plt.plot(dates_full_seq, spread_matrix[i], label=f"{tenor}")
+plt.title("Prediction Spread (Actual - Predicted) per Tenor (Full Dataset)")
 plt.axhline(0, color='black', linestyle='--')
 plt.ylabel("Spread")
 plt.legend(loc='upper right', ncol=6)
