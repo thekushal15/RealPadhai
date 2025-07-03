@@ -1,56 +1,39 @@
-Option Explicit
+function main(workbook: ExcelScript.Workbook) {
+  const sheet = workbook.getWorksheet("Report 1");
+  const table = sheet.getTables()[0]; // assuming the filtered table is the first table
 
-Sub IndustryGroupBreakdown()
-    Dim wsReport As Worksheet
-    Dim wsActive As Worksheet
-    Dim tbl As ListObject
-    Dim rngActive As Range
-    Dim dict As Object
-    Dim cell As Range
-    Dim key As Variant
-    
-    ' Set references
-    Set wsReport = ThisWorkbook.Sheets("Report 1")
-    Set wsActive = ActiveSheet
-    Set rngActive = ActiveCell
-    
-    ' Check if table exists in Report 1
-    On Error Resume Next
-    Set tbl = wsReport.ListObjects("Table1") ' Adjust table name if different
-    If tbl Is Nothing Then
-        MsgBox "Table not found in Report 1.", vbCritical
-        Exit Sub
-    End If
-    On Error GoTo 0
-    
-    ' Create dictionary to store sums
-    Set dict = CreateObject("Scripting.Dictionary")
-    
-    ' Loop through visible rows in the filtered table
-    For Each cell In tbl.ListColumns("TN Industry Group").DataBodyRange.SpecialCells(xlCellTypeVisible)
-        Dim industryGroup As String
-        Dim amount As Double
-        industryGroup = cell.Value
-        amount = cell.Offset(0, tbl.ListColumns("TOTAL PROD RENOVATED").Index - tbl.ListColumns("TN Industry Group").Index).Value
-        
-        If Not dict.Exists(industryGroup) Then
-            dict(industryGroup) = 0
-        End If
-        dict(industryGroup) = dict(industryGroup) + amount
-    Next cell
-    
-    ' Output headers
-    With wsActive
-        .Cells(rngActive.Row, rngActive.Column).Value = "EV Distribution"
-        .Cells(rngActive.Row, rngActive.Column + 1).Value = "Amount"
-    End With
-    
-    ' Output data
-    Dim rowOffset As Long
-    rowOffset = 1
-    For Each key In dict.Keys
-        wsActive.Cells(rngActive.Row + rowOffset, rngActive.Column).Value = key
-        wsActive.Cells(rngActive.Row + rowOffset, rngActive.Column + 1).Value = dict(key)
-        rowOffset = rowOffset + 1
-    Next key
-End Sub
+  // Get visible rows only (filtered)
+  const visibleRows = table.getRange().getVisibleView().getRows();
+
+  // Column indices (update these if your table changes structure)
+  const headers = table.getHeaderRowRange().getValues()[0];
+  const industryGroupCol = headers.indexOf("TN Industry Group");
+  const totalProdCol = headers.indexOf("TOTAL PROD RENOVATED");
+
+  // Create a dictionary to accumulate amounts
+  let breakdown: { [key: string]: number } = {};
+
+  visibleRows.forEach(row => {
+    const industry = row.getCell(industryGroupCol).getText();
+    const amount = parseFloat(row.getCell(totalProdCol).getText()) || 0;
+
+    if (industry in breakdown) {
+      breakdown[industry] += amount;
+    } else {
+      breakdown[industry] = amount;
+    }
+  });
+
+  // Prepare output data
+  const output: (string | number)[][] = [["EV Distribution", "Amount"]];
+  for (let key in breakdown) {
+    output.push([key, Math.round((breakdown[key] + Number.EPSILON) * 100) / 100]);
+  }
+
+  // Write to active cell
+  const activeCell = workbook.getActiveCell();
+  const startRow = activeCell.getRowIndex();
+  const startCol = activeCell.getColumnIndex();
+  const destRange = sheet.getRangeByIndexes(startRow, startCol, output.length, 2);
+  destRange.setValues(output);
+}
