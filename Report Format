@@ -1,4 +1,46 @@
 function main(workbook: ExcelScript.Workbook) {
+  const sheet = workbook.getWorksheet("PivotSheet"); // <- your pivot sheet name here
+  const pivotStartCell = sheet.getRange("A1"); // <- where your pivot table begins
+
+  // We'll assume pivot has two columns: [TN Industry Group, Total Amount]
+  const pivotRange = pivotStartCell.getSurroundingRegion();
+  const pivotData = pivotRange.getValues();
+
+  let output: (string | number)[][] = [["EV Distribution", "Amount"]];
+
+  // Skip header row, start from row 1
+  for (let i = 1; i < pivotData.length; i++) {
+    const row = pivotData[i];
+    const group = row[0] as string;
+    const amount = parseFloat(row[1] as string) || 0;
+
+    output.push([group, Math.round((amount + Number.EPSILON) * 100) / 100]);
+  }
+
+  // Write output at active cell
+  const activeCell = workbook.getActiveCell();
+  const startRow = activeCell.getRowIndex();
+  const startCol = activeCell.getColumnIndex();
+  sheet.getRangeByIndexes(startRow, startCol, output.length, 2).setValues(output);
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+function main(workbook: ExcelScript.Workbook) {
   const sheet = workbook.getWorksheet("Report 1");
 
   // Define the used range
