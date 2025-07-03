@@ -8,9 +8,12 @@
 )
 
 
-=SUMIFS(DataTbl[TOTAL PROD RENOVATED], DataTbl[Trading Name], B3, DataTbl[TN Industry Group], A1)
-
-
+=SUMPRODUCT(
+  (DataTbl[Trading Name]=B3) *
+  (DataTbl[TN Industry Group]=A1) *
+  (SUBTOTAL(103, OFFSET(DataTbl[Trading Name], ROW(DataTbl[Trading Name])-MIN(ROW(DataTbl[Trading Name])), 0, 1))) *
+  (DataTbl[TOTAL PROD RENOVATED])
+)
 
 
 
