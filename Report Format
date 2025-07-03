@@ -1,5 +1,66 @@
 function main(workbook: ExcelScript.Workbook) {
   const sheet = workbook.getWorksheet("Report 1");
+
+  // Define the used range
+  const dataRange = sheet.getUsedRange();
+  const data = dataRange.getValues();
+
+  const headers = data[0] as string[];
+  const industryCol = headers.indexOf("TN Industry Group");
+  const totalProdCol = headers.indexOf("TOTAL PROD RENOVATED");
+
+  if (industryCol === -1 || totalProdCol === -1) {
+    throw new Error("Required columns not found. Please check header names.");
+  }
+
+  let breakdown: { [key: string]: number } = {};
+
+  // Iterate over visible rows only (skip header)
+  const rowCount = dataRange.getRowCount();
+  for (let i = 1; i < rowCount; i++) {
+    const row = data[i];
+    const rowRange = dataRange.getCell(i, 0).getEntireRow();
+
+    if (!rowRange.getVisibleView()) continue; // skip hidden rows
+
+    const industry = row[industryCol] as string;
+    const amount = parseFloat(row[totalProdCol] as string) || 0;
+
+    breakdown[industry] = (breakdown[industry] || 0) + amount;
+  }
+
+  // Output
+  const output: (string | number)[][] = [["EV Distribution", "Amount"]];
+  for (const [key, value] of Object.entries(breakdown)) {
+    output.push([key, Math.round((value + Number.EPSILON) * 100) / 100]);
+  }
+
+  const activeCell = workbook.getActiveCell();
+  const startRow = activeCell.getRowIndex();
+  const startCol = activeCell.getColumnIndex();
+  sheet.getRangeByIndexes(startRow, startCol, output.length, 2).setValues(output);
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+function main(workbook: ExcelScript.Workbook) {
+  const sheet = workbook.getWorksheet("Report 1");
   const table = sheet.getTables()[0]; // assuming the filtered table is the first table
 
   // Get visible rows only (filtered)
