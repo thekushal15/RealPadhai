@@ -1,0 +1,56 @@
+Option Explicit
+
+Sub IndustryGroupBreakdown()
+    Dim wsReport As Worksheet
+    Dim wsActive As Worksheet
+    Dim tbl As ListObject
+    Dim rngActive As Range
+    Dim dict As Object
+    Dim cell As Range
+    Dim key As Variant
+    
+    ' Set references
+    Set wsReport = ThisWorkbook.Sheets("Report 1")
+    Set wsActive = ActiveSheet
+    Set rngActive = ActiveCell
+    
+    ' Check if table exists in Report 1
+    On Error Resume Next
+    Set tbl = wsReport.ListObjects("Table1") ' Adjust table name if different
+    If tbl Is Nothing Then
+        MsgBox "Table not found in Report 1.", vbCritical
+        Exit Sub
+    End If
+    On Error GoTo 0
+    
+    ' Create dictionary to store sums
+    Set dict = CreateObject("Scripting.Dictionary")
+    
+    ' Loop through visible rows in the filtered table
+    For Each cell In tbl.ListColumns("TN Industry Group").DataBodyRange.SpecialCells(xlCellTypeVisible)
+        Dim industryGroup As String
+        Dim amount As Double
+        industryGroup = cell.Value
+        amount = cell.Offset(0, tbl.ListColumns("TOTAL PROD RENOVATED").Index - tbl.ListColumns("TN Industry Group").Index).Value
+        
+        If Not dict.Exists(industryGroup) Then
+            dict(industryGroup) = 0
+        End If
+        dict(industryGroup) = dict(industryGroup) + amount
+    Next cell
+    
+    ' Output headers
+    With wsActive
+        .Cells(rngActive.Row, rngActive.Column).Value = "EV Distribution"
+        .Cells(rngActive.Row, rngActive.Column + 1).Value = "Amount"
+    End With
+    
+    ' Output data
+    Dim rowOffset As Long
+    rowOffset = 1
+    For Each key In dict.Keys
+        wsActive.Cells(rngActive.Row + rowOffset, rngActive.Column).Value = key
+        wsActive.Cells(rngActive.Row + rowOffset, rngActive.Column + 1).Value = dict(key)
+        rowOffset = rowOffset + 1
+    Next key
+End Sub
