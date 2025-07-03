@@ -1,3 +1,14 @@
+=UNIQUE(FILTER(DataTbl[Trading Name], (DataTbl[TN Industry Group]=A1) * (SUBTOTAL(103, OFFSET(DataTbl[Trading Name], ROW(DataTbl[Trading Name])-MIN(ROW(DataTbl[Trading Name])), 0, 1)))))
+
+=SUMIFS(DataTbl[TOTAL PROD RENOVATED], DataTbl[Trading Name], B3, DataTbl[TN Industry Group], A1)
+
+
+
+
+
+
+
+
 function main(workbook: ExcelScript.Workbook) {
   const sheet = workbook.getWorksheet("PivotSheet"); // <- your pivot sheet name here
   const pivotStartCell = sheet.getRange("A1"); // <- where your pivot table begins
