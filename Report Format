@@ -1,3 +1,38 @@
+=SORTBY(
+  UNIQUE(FILTER(DataTbl[Trading Name], (DataTbl[TN Industry Group]=A1)*(SUBTOTAL(103, OFFSET(DataTbl[Trading Name], ROW(DataTbl[Trading Name])-MIN(ROW(DataTbl[Trading Name])), 0, 1))))),
+  BYROW(
+    UNIQUE(FILTER(DataTbl[Trading Name], (DataTbl[TN Industry Group]=A1)*(SUBTOTAL(103, OFFSET(DataTbl[Trading Name], ROW(DataTbl[Trading Name])-MIN(ROW(DataTbl[Trading Name])), 0, 1))))),
+    LAMBDA(n, SUMIFS(DataTbl[TOTAL PROD RENOVATED], DataTbl[Trading Name], n, DataTbl[TN Industry Group], A1))
+  ),
+  -1
+)
+
+
+=SUMIFS(DataTbl[TOTAL PROD RENOVATED], DataTbl[Trading Name], B3, DataTbl[TN Industry Group], A1)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 =UNIQUE(FILTER(DataTbl[Trading Name], (DataTbl[TN Industry Group]=A1) * (SUBTOTAL(103, OFFSET(DataTbl[Trading Name], ROW(DataTbl[Trading Name])-MIN(ROW(DataTbl[Trading Name])), 0, 1)))))
 
 =SUMIFS(DataTbl[TOTAL PROD RENOVATED], DataTbl[Trading Name], B3, DataTbl[TN Industry Group], A1)
