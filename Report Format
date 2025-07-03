@@ -37,3 +37,59 @@ function main(workbook: ExcelScript.Workbook) {
   const destRange = sheet.getRangeByIndexes(startRow, startCol, output.length, 2);
   destRange.setValues(output);
 }
+
+
+
+
+
+
+
+
+
+
+
+function main(workbook: ExcelScript.Workbook) {
+  const sheet = workbook.getWorksheet("Report 1");
+  const table = sheet.getTables()[0]; // Assuming your filtered table is the first one on the sheet
+
+  // Get the visible values from the table (including header row)
+  const visibleRange = table.getRange().getVisibleView().getRange();
+  const visibleValues = visibleRange.getValues();
+
+  // Get header row and determine column indices
+  const headers = visibleValues[0] as string[];
+  const industryCol = headers.indexOf("TN Industry Group");
+  const totalProdCol = headers.indexOf("TOTAL PROD RENOVATED");
+
+  if (industryCol === -1 || totalProdCol === -1) {
+    throw new Error("One or both required columns not found.");
+  }
+
+  // Create dictionary to sum by industry group
+  let breakdown: { [key: string]: number } = {};
+
+  for (let i = 1; i < visibleValues.length; i++) {
+    const row = visibleValues[i];
+    const industry = row[industryCol] as string;
+    const amount = parseFloat(row[totalProdCol] as string) || 0;
+
+    if (industry in breakdown) {
+      breakdown[industry] += amount;
+    } else {
+      breakdown[industry] = amount;
+    }
+  }
+
+  // Prepare output array
+  const output: (string | number)[][] = [["EV Distribution", "Amount"]];
+  for (let industry in breakdown) {
+    output.push([industry, Math.round((breakdown[industry] + Number.EPSILON) * 100) / 100]);
+  }
+
+  // Write output at the active cell location
+  const activeCell = workbook.getActiveCell();
+  const startRow = activeCell.getRowIndex();
+  const startCol = activeCell.getColumnIndex();
+  const outputRange = sheet.getRangeByIndexes(startRow, startCol, output.length, 2);
+  outputRange.setValues(output);
+}
