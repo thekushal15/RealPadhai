@@ -52,7 +52,8 @@ def create_sequences(df, input_cols, target_cols, window=14):
 
 def train_model(model, train_loader, val_loader, optimizer, loss_fn, device, max_epochs=50, patience=10):
     train_losses, val_losses = [], []
-    best_model, best_val_loss = None, float('inf')
+    best_model = model.state_dict()  # Initialize with current model state
+    best_val_loss = float('inf')
     wait = 0
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3)
     
@@ -88,14 +89,14 @@ def train_model(model, train_loader, val_loader, optimizer, loss_fn, device, max
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            best_model = model.state_dict()
+            best_model = model.state_dict()  # Update best model
             wait = 0
         else:
             wait += 1
             if wait >= patience:
                 break
 
-    model.load_state_dict(best_model)
+    model.load_state_dict(best_model)  # Load the best model state
 
     plt.plot(train_losses, label="Train Loss")
     plt.plot(val_losses, label="Val Loss")
