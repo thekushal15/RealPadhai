@@ -126,6 +126,7 @@ def fit_best_model(best_params):
     return model
 
 def plot_predictions(dates, y_true, y_pred, tenors):
+    dates = dates[:len(y_pred)]
     for i, tenor in enumerate(tenors):
         plt.figure(figsize=(10, 4))
         plt.plot(dates, y_true[:, i], label='Actual')
@@ -181,6 +182,7 @@ def shap_summary_plot(X_input, model, background_size=100):
     explainer = shap.DeepExplainer(model, background)
     shap_values = explainer.shap_values(torch.tensor(X_input[:background_size], dtype=torch.float32))
     shap.summary_plot(shap_values, X_input[:background_size])
+
 
 
 
