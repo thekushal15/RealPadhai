@@ -1,3 +1,23 @@
+def plot_actual_vs_predicted(y_true, y_pred, dates, title, filename):
+    # Align dates with y_pred length
+    dates = dates[-len(y_pred):]  # Take last n dates matching y_pred rows
+    plt.figure(figsize=(12, 6))
+    for i in range(y_true.shape[1]):
+        plt.plot(dates, y_true[-len(y_pred):, i], label=f"Actual Tenor {output_columns[i]}")
+        plt.plot(dates, y_pred[:, i], '--', label=f"Predicted Tenor {output_columns[i]}")
+    plt.title(title)
+    plt.xlabel("Date")
+    plt.ylabel("Yield")
+    plt.legend()
+    plt.savefig(filename)
+    plt.close()
+
+
+
+
+
+
+
 import pandas as pd
 import numpy as np
 import torch
