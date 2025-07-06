@@ -318,7 +318,7 @@ def main():
         model_func = EnhancedYieldMLP(
             input_dim=X_pca_reduced.shape[1],
             hidden_dim=study_func.best_params['hidden_dim'],
-            output]s_dim=y.shape[1],
+            output_dim=y.shape[1],  # Corrected from output]s_dim
             dropout=study_func.best_params['dropout'],
             num_layers=study_func.best_params['num_layers']
         ).to(device)
