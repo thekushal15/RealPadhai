@@ -48,14 +48,15 @@ def load_and_preprocess_data(file_path="OIS_SPOT_ZAR.csv"):
 # Step 2: Outlier Filtering with Percentage Change
 def filter_outliers(df, output_columns):
     """Calculate percentage change for each output and remove top 3% extreme movements."""
-    # Calculate percentage change for each output column
-    percentage_changes = df[output_columns].pct_change().abs() * 100  # Convert to percentage
+    # Calculate percentage change for each output column, dropping the first row to avoid NaN
+    percentage_changes = df[output_columns].pct_change().abs().iloc[1:] * 100  # Convert to percentage
+    df_shifted = df.iloc[1:].copy()  # Align with percentage changes
     # Create a new column with maximum percentage change per row
-    df['max_pct_change'] = percentage_changes.max(axis=1)
+    df_shifted['max_pct_change'] = percentage_changes.max(axis=1)
     # Calculate 97th percentile threshold
-    threshold = df['max_pct_change'].quantile(0.97)
+    threshold = df_shifted['max_pct_change'].quantile(0.97)
     # Remove rows where max percentage change exceeds threshold
-    df_filtered = df[df['max_pct_change'] <= threshold].copy()
+    df_filtered = df_shifted[df_shifted['max_pct_change'] <= threshold].copy()
     # Drop the temporary column
     df_filtered = df_filtered.drop(columns=['max_pct_change'])
     return df_filtered
@@ -146,6 +147,8 @@ def mc_dropout_predictions(model, X_tensor, n_samples=100):
 # Step 7: Visualization Functions
 def plot_actual_vs_predicted(y_true, y_pred, dates, title, filename):
     dates = dates[-len(y_pred):]  # Match dates to y_pred length
+    if len(dates) != len(y_pred):
+        print(f"Warning: Date length ({len(dates)}) does not match prediction length ({len(y_pred)}). Truncating dates.")
     plt.figure(figsize=(12, 6))
     for i in range(y_true.shape[1]):
         plt.plot(dates, y_true[-len(y_pred):, i], label=f"Actual Tenor {output_columns[i]}")
@@ -159,6 +162,8 @@ def plot_actual_vs_predicted(y_true, y_pred, dates, title, filename):
 
 def plot_confidence_intervals(y_true, mean_preds, std_preds, dates, title, filename):
     dates = dates[-len(mean_preds):]  # Match dates to mean_preds length
+    if len(dates) != len(mean_preds):
+        print(f"Warning: Date length ({len(dates)}) does not match mean prediction length ({len(mean_preds)}). Truncating dates.")
     plt.figure(figsize=(12, 6))
     for i in range(y_true.shape[1]):
         plt.plot(dates, y_true[-len(mean_preds):, i], label=f"Actual Tenor {output_columns[i]}")
@@ -189,6 +194,9 @@ def plot_tenor_spreads(y_true, y_pred, tenors, filename):
 def plot_r2_over_time(y_true, y_pred, dates, filename):
     dates = dates[-len(y_pred):]  # Match dates to y_pred length
     r2_scores = [r2_score(y_true[i:i+1, :], y_pred[i:i+1, :]) for i in range(len(y_pred)) if i+1 < len(y_true)]
+    if not r2_scores:
+        print("Warning: Not enough data for R² over time plot.")
+        return
     plt.figure(figsize=(12, 6))
     plt.plot(dates, r2_scores)
     plt.title("R² Score Over Time")
@@ -209,7 +217,7 @@ def main():
     
     # Filter outliers based on percentage change
     df_filtered = filter_outliers(df, output_columns)
-    X_pca_filtered = X_pca_reduced[df_filtered.index]
+    X_pca_filtered = X_pca_reduced[df_filtered.index - 1]  # Adjust index due to dropping first row
     y = df_filtered[output_columns].values
     dates_filtered = dates[df_filtered.index]
     
@@ -221,8 +229,9 @@ def main():
     y_scaler = MinMaxScaler()
     y_scaled = y_scaler.fit_transform(y)
     
-    # Split data for evaluation (80-20)
-    train_size = int(0.8 * len(X_pca_filtered))
+    # Split data for evaluation (80-20), ensure test set has at least 2 samples
+    total_samples = len(X_pca_filtered)
+    train_size = max(int(0.8 * total_samples), total_samples - 2)  # Ensure at least 2 test samples
     X_train, X_test = X_pca_filtered[:train_size], X_pca_filtered[train_size:]
     y_train, y_test = y_scaled[:train_size], y_scaled[train_size:]
     dates_train, dates_test = dates_filtered[:train_size], dates_filtered[train_size:]
@@ -270,8 +279,8 @@ def main():
     plot_r2_over_time(y, all_preds, dates_filtered, "r2_over_time.png")
     
     # Calculate and print R² and MSE scores
-    if len(y[train_size:]) < 2:
-        print("Warning: Test set has less than 2 samples, R² and MSE for test not calculated.")
+    if len(y_train) < 2 or len(y_test) < 2:
+        print("Warning: Training or test set has less than 2 samples, R² and MSE for test not calculated.")
         r2_test = float('nan')
         mse_test = float('nan')
     else:
