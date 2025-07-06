@@ -36,6 +36,12 @@ df_pca = pd.DataFrame(X_pca, columns=pca_cols)
 df_final = pd.concat([df[['Dates']].reset_index(drop=True), df_pca, pd.DataFrame(y_scaled, columns=target_cols)], axis=1)
 
 
+# Use updated pca_cols as input columns
+X_seq, y_seq, D_seq = create_sequences(df_final, input_cols=pca_cols, target_cols=target_cols, window=7)
+
+# Sanity check
+print("X_seq:", X_seq.shape)  # (N, 7, features)
+print("y_seq:", y_seq.shape)  # (N, 12)
 
 
 
