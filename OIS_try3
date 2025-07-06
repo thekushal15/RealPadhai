@@ -1,182 +1,199 @@
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
+from sklearn.metrics import r2_score, mean_squared_error
+
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
-from sklearn.metrics import mean_squared_error, r2_score
-from sklearn.preprocessing import StandardScaler, MinMaxScaler
-from sklearn.decomposition import PCA
-import matplotlib.pyplot as plt
 
 # Reproducibility
 torch.manual_seed(42)
 np.random.seed(42)
 
-# Load and preprocess data
-def load_and_preprocess_data(file_path="OIS_SPOT_ZAR.csv", explained_var_threshold=97):
+# ⚙️ Step 1: Sequence Builder
+def create_sequences(df, input_cols, target_cols, window=7):
+    X_seq, Y_seq, D_seq = [], [], []
+    for i in range(len(df) - window):
+        X_seq.append(df[input_cols].iloc[i:i+window].values)
+        Y_seq.append(df[target_cols].iloc[i+window].values)
+        D_seq.append(df['Dates'].iloc[i+window])
+    return np.array(X_seq), np.array(Y_seq), np.array(D_seq)
+
+# 🧠 Step 2: LSTM Model
+class YieldLSTM(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim, dropout=0.2):
+        super().__init__()
+        self.lstm = nn.LSTM(input_dim, hidden_dim, batch_first=True, num_layers=2, dropout=dropout, bidirectional=True)
+        self.fc = nn.Sequential(
+            nn.Linear(hidden_dim*2, 128),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(128, output_dim)
+        )
+    def forward(self, x):
+        out, _ = self.lstm(x)
+        out = out[:, -1, :]  # last timestep
+        return self.fc(out)
+
+# 🏋️‍♂️ Step 3: Training
+def train_model(model, train_loader, val_loader, optimizer, loss_fn, device, max_epochs=50, patience=5):
+    train_losses, val_losses = [], []
+    best_model, best_val_loss = None, float('inf')
+    wait = 0
+
+    for epoch in range(max_epochs):
+        model.train()
+        running_loss = 0
+        for xb, yb in train_loader:
+            xb, yb = xb.to(device), yb.to(device)
+            optimizer.zero_grad()
+            preds = model(xb)
+            loss = loss_fn(preds, yb)
+            loss.backward()
+            optimizer.step()
+            running_loss += loss.item()
+        train_losses.append(running_loss)
+
+        model.eval()
+        val_loss = 0
+        with torch.no_grad():
+            for xb, yb in val_loader:
+                xb, yb = xb.to(device), yb.to(device)
+                preds = model(xb)
+                val_loss += loss_fn(preds, yb).item()
+        val_losses.append(val_loss)
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_model = model.state_dict()
+            wait = 0
+        else:
+            wait += 1
+            if wait >= patience:
+                print(f"Early stopped at epoch {epoch}")
+                break
+
+    model.load_state_dict(best_model)
+
+    # 🔍 Plot training curve
+    plt.plot(train_losses, label="Train Loss")
+    plt.plot(val_losses, label="Val Loss")
+    plt.title("Loss Curve")
+    plt.xlabel("Epoch")
+    plt.ylabel("MSE Loss")
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+    return model
+
+# 📊 Step 4: Plot Tenor-wise Prediction
+def plot_predictions(dates, y_true, y_pred, tenors):
+    for i, tenor in enumerate(tenors):
+        plt.figure(figsize=(10, 4))
+        plt.plot(dates, y_true[:, i], label='Actual')
+        plt.plot(dates, y_pred[:, i], '--', label='Predicted')
+        plt.title(f"Yield: {tenor}")
+        plt.xlabel("Date")
+        plt.ylabel("Yield")
+        plt.legend()
+        plt.tight_layout()
+        plt.grid(True)
+        plt.show()
+
+# 📈 Step 5: Plot Yield Curve Shapes
+def plot_yield_curves(y_true, y_pred, tenors):
+    for i in range(0, len(y_pred), max(1, len(y_pred)//5)):  # plot 5 samples
+        plt.plot(tenors, y_true[i], label=f"True {i}")
+        plt.plot(tenors, y_pred[i], linestyle='--', label=f"Pred {i}")
+    plt.title("Yield Curve Shapes (sample dates)")
+    plt.xlabel("Tenor")
+    plt.ylabel("Yield")
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+
+
+
+
+
+
+
+
+
+def run_yield_lstm_pipeline(file_path="OIS_SPOT_ZAR.csv"):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
     df = pd.read_csv(file_path)
     df.columns = df.columns.str.strip()
     df['Dates'] = pd.to_datetime(df['Dates'])
     df.sort_values('Dates', inplace=True)
     df.dropna(inplace=True)
 
-    # Define columns
-    target_columns = ["1M", "2M", "3M", "4M", "5M", "6M", "7M", "8M", "9M", "1Y", "2Y", "3Y"]
-    feature_columns = [col for col in df.columns if col not in target_columns + ["Dates"]]
+    # 🔻 Define columns
+    target_cols = ["1M", "2M", "3M", "4M", "5M", "6M", "7M", "8M", "9M", "1Y", "2Y", "3Y"]
+    input_cols = [col for col in df.columns if col not in target_cols + ['Dates']]
 
-    # Scale features
-    x_scaler = StandardScaler()
-    X_scaled = x_scaler.fit_transform(df[feature_columns])
+    # 🧼 Scale features
+    X_scaler = StandardScaler()
+    df[input_cols] = X_scaler.fit_transform(df[input_cols])
 
-    # PCA
-    pca = PCA()
-    X_pca = pca.fit_transform(X_scaled)
-    cumulative_variance = np.cumsum(pca.explained_variance_ratio_) * 100
-    num_components = np.argmax(cumulative_variance >= explained_var_threshold) + 1
-    X_reduced = X_pca[:, :num_components]
-
-    return df, X_reduced, df[target_columns].values, df["Dates"], target_columns
-
-# Model Definition
-class EnhancedYieldMLP(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim, dropout, num_layers=3):
-        super().__init__()
-        layers = []
-        for _ in range(num_layers):
-            layers += [
-                nn.Linear(input_dim, hidden_dim),
-                nn.BatchNorm1d(hidden_dim),
-                nn.ReLU(),
-                nn.Dropout(dropout)
-            ]
-            input_dim = hidden_dim
-        layers.append(nn.Linear(hidden_dim, output_dim))
-        self.network = nn.Sequential(*layers)
-        self.apply(self._init_weights)
-
-    def _init_weights(self, module):
-        if isinstance(module, nn.Linear):
-            nn.init.xavier_uniform_(module.weight)
-            nn.init.zeros_(module.bias)
-
-    def forward(self, x):
-        return self.network(x)
-
-# Training loop
-def train_model(model, loader, optimizer, loss_fn, device, epochs=100, patience=10):
-    best_loss = float('inf')
-    best_state = None
-    counter = 0
-
-    for epoch in range(epochs):
-        model.train()
-        total_loss = 0
-
-        for X_batch, y_batch in loader:
-            X_batch, y_batch = X_batch.to(device), y_batch.to(device)
-            optimizer.zero_grad()
-            predictions = model(X_batch)
-            loss = loss_fn(predictions, y_batch)
-            loss.backward()
-            optimizer.step()
-            total_loss += loss.item()
-
-        if total_loss < best_loss:
-            best_loss = total_loss
-            best_state = model.state_dict()
-            counter = 0
-        else:
-            counter += 1
-            if counter >= patience:
-                print(f"Early stopping at epoch {epoch}")
-                break
-
-    model.load_state_dict(best_state)
-    return model
-
-# Plotting function
-def plot_yield_curve(dates, actual, predicted, tenor, filename):
-    dates = dates[-len(predicted):]
-    plt.figure(figsize=(12, 6))
-    plt.plot(dates, actual[-len(predicted):], label="Actual")
-    plt.plot(dates, predicted, linestyle='--', label="Predicted")
-    plt.title(f"Yield Curve - {tenor}")
-    plt.xlabel("Date")
-    plt.ylabel("Yield")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(filename)
-    plt.close()
-
-# Main function
-def main():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    try:
-        df, X, y, dates, target_columns = load_and_preprocess_data()
-    except FileNotFoundError:
-        print("❌ CSV file not found.")
-        return
-
-    # Scale targets
     y_scaler = MinMaxScaler()
-    y_scaled = y_scaler.fit_transform(y)
+    df[target_cols] = y_scaler.fit_transform(df[target_cols])
 
-    # Train-test split
-    n = len(X)
-    train_size = max(int(0.8 * n), n - 2)
-    X_train, X_test = X[:train_size], X[train_size:]
-    y_train, y_test = y_scaled[:train_size], y_scaled[train_size:]
-    dates_train, dates_test = dates[:train_size], dates[train_size:]
+    # 🔁 Create sequences
+    X, y, dates = create_sequences(df, input_cols, target_cols, window=7)
 
-    # DataLoader
-    train_dataset = TensorDataset(
-        torch.tensor(X, dtype=torch.float32),
-        torch.tensor(y_scaled, dtype=torch.float32)
-    )
-    train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True)
+    # 🪜 Train-test split (rolling)
+    split_idx = int(0.8 * len(X))
+    X_train, X_val = X[:split_idx], X[split_idx:]
+    y_train, y_val = y[:split_idx], y[split_idx:]
+    dates_val = dates[split_idx:]
 
-    # Model
-    model = EnhancedYieldMLP(
-        input_dim=X.shape[1],
-        hidden_dim=138,
-        output_dim=len(target_columns),
-        dropout=0.1003,
-        num_layers=5
-    ).to(device)
+    # 🎯 Dataloaders
+    train_loader = DataLoader(TensorDataset(torch.tensor(X_train, dtype=torch.float32),
+                                            torch.tensor(y_train, dtype=torch.float32)), batch_size=32, shuffle=True)
+    val_loader = DataLoader(TensorDataset(torch.tensor(X_val, dtype=torch.float32),
+                                          torch.tensor(y_val, dtype=torch.float32)), batch_size=32)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=0.003671, weight_decay=1e-5)
+    # ⚙️ Model
+    model = YieldLSTM(input_dim=X.shape[2], hidden_dim=64, output_dim=len(target_cols), dropout=0.2).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     loss_fn = nn.MSELoss()
 
-    # Train
-    model = train_model(model, train_loader, optimizer, loss_fn, device)
+    # 🏋️ Train
+    model = train_model(model, train_loader, val_loader, optimizer, loss_fn, device)
 
-    # Predict
+    # 📈 Predict
     model.eval()
     with torch.no_grad():
-        X_tensor = torch.tensor(X, dtype=torch.float32).to(device)
-        X_test_tensor = torch.tensor(X_test, dtype=torch.float32).to(device)
-        y_pred_scaled = model(X_tensor).cpu().numpy()
-        y_test_pred_scaled = model(X_test_tensor).cpu().numpy()
+        X_val_tensor = torch.tensor(X_val, dtype=torch.float32).to(device)
+        y_pred = model(X_val_tensor).cpu().numpy()
+        y_val_true = y_val
+        y_pred_true = y_scaler.inverse_transform(y_pred)
+        y_val_true = y_scaler.inverse_transform(y_val_true)
 
-    # Inverse scale
-    y_pred = y_scaler.inverse_transform(y_pred_scaled)
-    y_test_pred = y_scaler.inverse_transform(y_test_pred_scaled)
+    # 📊 Visualize
+    plot_predictions(dates_val, y_val_true, y_pred_true, target_cols)
+    plot_yield_curves(y_val_true, y_pred_true, target_cols)
 
-    # Plot
-    for i, tenor in enumerate(target_columns):
-        plot_yield_curve(dates, y[:, i], y_pred[:, i], tenor, f"{tenor}_all.png")
-        plot_yield_curve(dates_test, y[train_size:, i], y_test_pred[:, i], tenor, f"{tenor}_test.png")
+    # 🧮 Metrics
+    r2 = r2_score(y_val_true, y_pred_true)
+    mse = mean_squared_error(y_val_true, y_pred_true)
+    print(f"R² Score (Val): {r2:.4f}")
+    print(f"MSE (Val): {mse:.6f}")
 
-    # Metrics
-    if len(y_test) >= 2:
-        print(f"R² Test: {r2_score(y_test, y_test_pred_scaled):.4f}")
-        print(f"MSE Test: {mean_squared_error(y_test, y_test_pred_scaled):.4f}")
-    else:
-        print("⚠️ Test set too small for reliable metrics.")
 
-    print(f"R² Full: {r2_score(y_scaled, y_pred_scaled):.4f}")
-    print(f"MSE Full: {mean_squared_error(y_scaled, y_pred_scaled):.4f}")
 
-if __name__ == "__main__":
-    main()
+
+
+
+
+
+
+
+
+run_yield_lstm_pipeline("OIS_SPOT_ZAR.csv")
