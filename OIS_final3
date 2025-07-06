@@ -181,3 +181,31 @@ def shap_summary_plot(X_input, model, background_size=100):
     explainer = shap.DeepExplainer(model, background)
     shap_values = explainer.shap_values(torch.tensor(X_input[:background_size], dtype=torch.float32))
     shap.summary_plot(shap_values, X_input[:background_size])
+
+
+
+
+
+
+study = optuna.create_study(direction="minimize")
+study.optimize(objective, n_trials=20)
+print(study.best_trial.params)
+
+
+best_model = fit_best_model(study.best_trial.params)
+
+
+
+best_model.eval()
+with torch.no_grad():
+    y_val_pred_scaled = best_model(torch.tensor(X_val, dtype=torch.float32).to(device)).cpu().numpy()
+    y_val_pred = scaler_y.inverse_transform(y_val_pred_scaled)
+
+r2_val = r2_score(scaler_y.inverse_transform(y_val), y_val_pred)
+print("R² on Validation:", r2_val)
+
+plot_predictions(D_val, scaler_y.inverse_transform(y_val), y_val_pred, target_cols)
+
+
+
+shap_summary_plot(X_seq.reshape(X_seq.shape[0], -1), best_model)
