@@ -161,11 +161,16 @@ def predict_with_uncertainty(model, input_tensor, scaler_y, target_cols, n_sampl
     return mean, lower, upper
 
 # Pipeline execution
-
 df = pd.read_csv("OIS_SPOT_ZAR.csv")
 df.columns = df.columns.str.strip()
 df['Dates'] = pd.to_datetime(df['Dates'])
-df = df.sort_values("Dates").dropna()
+df = df.sort_values("Dates")
+
+# Drop rows with any NaN values
+df = df.dropna()
+
+# Drop columns that are all NaN or all zeros
+df = df.dropna(axis=1, how='all').loc[:, (df != 0).any()]
 
 target_cols = ["1M", "2M", "3M", "4M", "5M", "6M", "7M", "8M", "9M", "1Y", "2Y", "3Y"]
 input_cols = [col for col in df.columns if col not in target_cols + ['Dates']]
