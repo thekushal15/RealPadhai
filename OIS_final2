@@ -1,0 +1,351 @@
+import pandas as pd
+import numpy as np
+import torch
+import torch.nn as nn
+from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler
+from sklearn.decomposition import PCA
+from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.model_selection import TimeSeriesSplit
+from scipy import stats
+import matplotlib.pyplot as plt
+import seaborn as sns
+from statsmodels.tsa.stattools import adfuller, grangercausalitytests
+import warnings
+warnings.filterwarnings('ignore')
+
+# Set random seed for reproducibility
+torch.manual_seed(42)
+np.random.seed(42)
+
+# ----------------------------------------------
+# 1. Data Preprocessing
+# ----------------------------------------------
+def preprocess_data(df, window=7, variance_ratio=0.97):
+    """Preprocess data with feature engineering and statistical validation."""
+    # Clean column names
+    df.columns = df.columns.str.strip().str.lower().str.replace(' ', '_')
+    
+    # Sort by date
+    df['dates'] = pd.to_datetime(df['dates'])
+    df = df.sort_values('dates').reset_index(drop=True)
+    
+    # Define features and targets
+    feature_cols = [col for col in df.columns if col not in ['dates', '1m', '2m', '3m', '4m', '5m', '6m', '7m', '8m', '9m', '1y', '2y', '3y']]
+    target_cols = ['1m', '2m', '3m', '4m', '5m', '6m', '7m', '8m', '9m', '1y', '2y', '3y']
+    
+    # Feature engineering
+    df['3y_1m_spread'] = df['3y'] - df['1m']
+    df['2y_1y_spread'] = df['2y'] - df['1y']
+    df['yield_volatility'] = df[target_cols].rolling(window=7).std().mean(axis=1)
+    for col in feature_cols:
+        df[f'{col}_lag1'] = df[col].shift(1)
+    feature_cols += ['3y_1m_spread', '2y_1y_spread', 'yield_volatility'] + [f'{col}_lag1' for col in feature_cols]
+    
+    # Handle missing values
+    df = df.dropna().reset_index(drop=True)
+    
+    # Scale features with RobustScaler
+    X = df[feature_cols].values
+    scaler_X = RobustScaler()
+    X_scaled = scaler_X.fit_transform(X)
+    
+    # Apply PCA
+    pca = PCA(n_components=variance_ratio)
+    X_pca = pca.fit_transform(X_scaled)
+    print(f"PCA: {X_pca.shape[1]} components explain {variance_ratio*100}% variance")
+    
+    # Scale targets with MinMaxScaler
+    y = df[target_cols].values
+    scaler_y = MinMaxScaler()
+    y_scaled = scaler_y.fit_transform(y)
+    
+    # Create sequences
+    X_seq, y_seq = [], []
+    for i in range(len(X_pca) - window):
+        X_seq.append(X_pca[i:i+window])
+        y_seq.append(y_scaled[i+window])
+    
+    X_seq, y_seq = np.array(X_seq), np.array(y_seq)
+    
+    # Statistical validation
+    print("\nADF Test for Stationarity (p-value < 0.05 indicates stationarity):")
+    for col in target_cols[:2]:  # Check first two targets as example
+        result = adfuller(df[col].dropna())
+        print(f"{col}: p-value = {result[1]:.4f}")
+    
+    print("\nCorrelation with 1M Yield:")
+    correlations = df[feature_cols + ['1m']].corr()['1m'].drop('1m')
+    print(correlations.sort_values(ascending=False)[:5])  # Top 5 correlations
+    
+    return X_seq, y_seq, scaler_X, scaler_y, pca, feature_cols, target_cols
+
+# ----------------------------------------------
+# 2. Model Definition
+# ----------------------------------------------
+class YieldCurveLSTM(nn.Module):
+    """Bidirectional LSTM model for yield curve prediction."""
+    def __init__(self, input_size, hidden_size=128, num_layers=2, dropout=0.3, num_tenors=12):
+        super(YieldCurveLSTM, self).__init__()
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True, 
+                           bidirectional=True, dropout=dropout)
+        self.dropout = nn.Dropout(dropout)
+        self.fc1 = nn.Linear(hidden_size * 2, hidden_size)
+        self.fc2 = nn.Linear(hidden_size, num_tenors)
+        self.relu = nn.ReLU()
+        
+    def forward(self, x):
+        out, _ = self.lstm(x)
+        out = self.dropout(out[:, -1, :])
+        out = self.relu(self.fc1(out))
+        out = self.fc2(out)
+        return out
+
+# ----------------------------------------------
+# 3. Training Function
+# ----------------------------------------------
+def train_model(model, X_train, y_train, X_val, y_val, epochs=100, batch_size=32, patience=10):
+    """Train the model with early stopping."""
+    criterion = nn.MSELoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    
+    X_train = torch.FloatTensor(X_train)
+    y_train = torch.FloatTensor(y_train)
+    X_val = torch.FloatTensor(X_val)
+    y_val = torch.FloatTensor(y_val)
+    
+    train_dataset = torch.utils.data.TensorDataset(X_train, y_train)
+    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    
+    train_losses, val_losses = [], []
+    best_val_loss = float('inf')
+    patience_counter = 0
+    
+    for epoch in range(epochs):
+        model.train()
+        train_loss = 0
+        for X_batch, y_batch in train_loader:
+            optimizer.zero_grad()
+            y_pred = model(X_batch)
+            loss = criterion(y_pred, y_batch)
+            loss.backward()
+            optimizer.step()
+            train_loss += loss.item()
+        
+        train_loss /= len(train_loader)
+        train_losses.append(train_loss)
+        
+        model.eval()
+        with torch.no_grad():
+            y_val_pred = model(X_val)
+            val_loss = criterion(y_val_pred, y_val).item()
+        val_losses.append(val_loss)
+        
+        print(f"Epoch {epoch+1}/{epochs}, Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f}")
+        
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            patience_counter = 0
+            torch.save(model.state_dict(), 'best_model.pth')
+        else:
+            patience_counter += 1
+            if patience_counter >= patience:
+                print("Early stopping triggered")
+                break
+    
+    return train_losses, val_losses
+
+# ----------------------------------------------
+# 4. Evaluation and Statistical Validation
+# ----------------------------------------------
+def evaluate_model(model, X_test, y_test, scaler_y, target_cols):
+    """Evaluate model with statistical tests and plots."""
+    model.eval()
+    X_test = torch.FloatTensor(X_test)
+    with torch.no_grad():
+        y_pred_scaled = model(X_test)
+    
+    y_pred = scaler_y.inverse_transform(y_pred_scaled.numpy())
+    y_test = scaler_y.inverse_transform(y_test)
+    
+    mse = mean_squared_error(y_test, y_pred, multioutput='raw_values')
+    r2 = r2_score(y_test, y_pred, multioutput='raw_values')
+    
+    print("\nPer-Tenor Metrics:")
+    for i, tenor in enumerate(target_cols):
+        print(f"{tenor}: MSE = {mse[i]:.6f}, R² = {r2[i]:.6f}")
+    
+    # Residual analysis
+    residuals = y_test - y_pred
+    shapiro_stat, shapiro_p = stats.shapiro(residuals.flatten())
+    print(f"\nShapiro-Wilk Test for Residual Normality: p-value = {shapiro_p:.4f} (p < 0.05 indicates non-normality)")
+    
+    # Granger Causality (example with first feature)
+    granger_test = grangercausalitytests(df[[feature_cols[0], '1m']].dropna(), maxlag=2, verbose=True)
+    
+    # Plot training vs validation loss
+    plt.figure(figsize=(10, 5))
+    plt.plot(train_losses, label='Train Loss')
+    plt.plot(val_losses, label='Validation Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('MSE Loss')
+    plt.title('Training vs Validation Loss')
+    plt.legend()
+    plt.show()
+    
+    # Plot actual vs predicted yields (first two tenors as example)
+    for i, tenor in enumerate(target_cols[:2]):
+        plt.figure(figsize=(10, 5))
+        plt.plot(y_test[:, i], label=f'Actual {tenor}')
+        plt.plot(y_pred[:, i], label=f'Predicted {tenor}')
+        plt.xlabel('Sample')
+        plt.ylabel('Yield')
+        plt.title(f'Actual vs Predicted {tenor}')
+        plt.legend()
+        plt.show()
+    
+    return y_pred, mse, r2
+
+# ----------------------------------------------
+# 5. Monte Carlo Dropout for Uncertainty
+# ----------------------------------------------
+def mc_dropout_predict(model, X, scaler_y, num_samples=100):
+    """Perform Monte Carlo Dropout for uncertainty estimation."""
+    model.train()
+    X = torch.FloatTensor(X)
+    predictions = []
+    
+    for _ in range(num_samples):
+        with torch.no_grad():
+            y_pred_scaled = model(X)
+            y_pred = scaler_y.inverse_transform(y_pred_scaled.numpy())
+            predictions.append(y_pred)
+    
+    predictions = np.stack(predictions, axis=0)
+    mean_pred = np.mean(predictions, axis=0)
+    std_pred = np.std(predictions, axis=0)
+    
+    plt.figure(figsize=(10, 5))
+    tenors = [1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 24, 36]  # In months
+    for idx in np.random.choice(len(X), 3, replace=False):
+        plt.plot(tenors, mean_pred[idx], label=f'Mean Prediction (Sample {idx})', marker='o')
+        plt.fill_between(tenors,
+                         mean_pred[idx] - 1.96 * std_pred[idx],
+                         mean_pred[idx] + 1.96 * std_pred[idx],
+                         alpha=0.2, label=f'95% CI (Sample {idx})')
+    plt.xlabel('Tenor (Months)')
+    plt.ylabel('Yield')
+    plt.title('Predicted Yield Curve with Uncertainty')
+    plt.legend()
+    plt.show()
+    
+    return mean_pred, std_pred
+
+# ----------------------------------------------
+# 6. Main Function with Rolling CV
+# ----------------------------------------------
+def main(df):
+    """Main pipeline with rolling cross-validation."""
+    X_seq, y_seq, scaler_X, scaler_y, pca, feature_cols, target_cols = preprocess_data(df)
+    
+    tscv = TimeSeriesSplit(n_splits=5)
+    train_losses_cv, val_losses_cv = [], []
+    models = []
+    
+    for train_idx, test_idx in tscv.split(X_seq):
+        X_train, X_test = X_seq[train_idx], X_seq[test_idx]
+        y_train, y_test = y_seq[train_idx], y_seq[test_idx]
+        X_train, X_val, y_train, y_val = train_test_split(X_train, y_train, test_size=0.2, shuffle=False)
+        
+        model = YieldCurveLSTM(input_size=X_seq.shape[2], num_tenors=len(target_cols))
+        train_losses, val_losses = train_model(model, X_train, y_train, X_val, y_val)
+        train_losses_cv.append(train_losses)
+        val_losses_cv.append(val_losses)
+        models.append(model)
+    
+    # Use the last model for evaluation
+    model = models[-1]
+    y_pred, mse, r2 = evaluate_model(model, X_seq[-len(test_idx):], y_seq[-len(test_idx):], scaler_y, target_cols)
+    mean_pred, std_pred = mc_dropout_predict(model, X_seq[-len(test_idx):], scaler_y)
+    
+    def predict_yield_curve(new_data):
+        """Predict yield curve for new 7-day macro window."""
+        new_data = new_data[feature_cols].values
+        new_data_scaled = scaler_X.transform(new_data)
+        new_data_pca = pca.transform(new_data_scaled)
+        new_data_seq = np.array([new_data_pca[-7:]])
+        new_data_seq = torch.FloatTensor(new_data_seq)
+        
+        model.eval()
+        with torch.no_grad():
+            y_pred_scaled = model(new_data_seq)
+        y_pred = scaler_y.inverse_transform(y_pred_scaled.numpy())
+        return y_pred
+    
+    return predict_yield_curve
+
+# ----------------------------------------------
+# Example Usage
+# ----------------------------------------------
+# Simulate sample data based on provided columns
+dates = pd.date_range(start='2021-12-21', end='2025-03-31', freq='D')
+np.random.seed(42)
+df = pd.DataFrame({
+    'dates': dates,
+    'usdzar': np.random.randn(len(dates)) * 0.1 + 15,
+    'o/n_interest_rate': np.random.randn(len(dates)) * 0.01 + 0.05,
+    'fwd_1m': np.random.randn(len(dates)) * 0.01 + 0.06,
+    'fwd_2m': np.random.randn(len(dates)) * 0.01 + 0.07,
+    'fwd_3m': np.random.randn(len(dates)) * 0.01 + 0.08,
+    'sarprt_index': np.random.randn(len(dates)) * 10 + 100,
+    'sacpiyoy_index': np.random.randn(len(dates)) * 1 + 5,
+    'satbal_index': np.random.randn(len(dates)) * 5 + 50,
+    'sarscony_index': np.random.randn(len(dates)) * 2 + 20,
+    'sffpmnsay_index': np.random.randn(len(dates)) * 3 + 30,
+    'sffpmmom_index': np.random.randn(len(dates)) * 0.5 + 1,
+    'sactgdp_index': np.random.randn(len(dates)) * 0.2 + 2,
+    'sacpimom_index': np.random.randn(len(dates)) * 0.1 + 1,
+    'sapmi_index': np.random.randn(len(dates)) * 0.3 + 3,
+    'sagdpyoy_index': np.random.randn(len(dates)) * 0.4 + 4,
+    'samym3y_index': np.random.randn(len(dates)) * 0.5 + 5,
+    'sactlvl_index': np.random.randn(len(dates)) * 0.6 + 6,
+    'sarstcsm_index': np.random.randn(len(dates)) * 0.7 + 7,
+    'scp8epny_index': np.random.randn(len(dates)) * 0.8 + 8,
+    'sacwc_index': np.random.randn(len(dates)) * 0.9 + 9,
+    'saueratq_index': np.random.randn(len(dates)) * 1.0 + 10,
+    'scp8014m_index': np.random.randn(len(dates)) * 1.1 + 11,
+    'sabbbbal_index': np.random.randn(len(dates)) * 1.2 + 12,
+    'sampgldy_index': np.random.randn(len(dates)) * 1.3 + 13,
+    'sagb_10.5_12/21/2026_govt': np.random.randn(len(dates)) * 0.02 + 0.1,
+    'sagb_8_01/31/2030_govt': np.random.randn(len(dates)) * 0.02 + 0.11,
+    'sagb_7_02/28/2031_govt': np.random.randn(len(dates)) * 0.02 + 0.12,
+    'sagb_8.25_03/31/2032_govt': np.random.randn(len(dates)) * 0.02 + 0.13,
+    'sagb_10_03/31/2033_govt': np.random.randn(len(dates)) * 0.02 + 0.14,
+    'sagb_8.875_02/28/2035_govt': np.random.randn(len(dates)) * 0.02 + 0.15,
+    'sagb_6.25_03/31/2036_govt': np.random.randn(len(dates)) * 0.02 + 0.16,
+    'sagb_8.5_01/31/2037_govt': np.random.randn(len(dates)) * 0.02 + 0.17,
+    'sagb_10.875_03/31/2038_govt': np.random.randn(len(dates)) * 0.02 + 0.18,
+    'sagb_6.5_02/28/2041_govt': np.random.randn(len(dates)) * 0.02 + 0.19,
+    'sagb_8.75_01/31/2044_govt': np.random.randn(len(dates)) * 0.02 + 0.20,
+    'sagb_8.75_02/28/2048_govt': np.random.randn(len(dates)) * 0.02 + 0.21,
+    'sagb_11.625_03/31/2053_govt': np.random.randn(len(dates)) * 0.02 + 0.22,
+    '1m': np.random.randn(len(dates)) * 0.02 + 0.02,
+    '2m': np.random.randn(len(dates)) * 0.02 + 0.03,
+    '3m': np.random.randn(len(dates)) * 0.02 + 0.04,
+    '4m': np.random.randn(len(dates)) * 0.02 + 0.05,
+    '5m': np.random.randn(len(dates)) * 0.02 + 0.06,
+    '6m': np.random.randn(len(dates)) * 0.02 + 0.07,
+    '7m': np.random.randn(len(dates)) * 0.02 + 0.08,
+    '8m': np.random.randn(len(dates)) * 0.02 + 0.09,
+    '9m': np.random.randn(len(dates)) * 0.02 + 0.10,
+    '1y': np.random.randn(len(dates)) * 0.02 + 0.11,
+    '2y': np.random.randn(len(dates)) * 0.02 + 0.12,
+    '3y': np.random.randn(len(dates)) * 0.02 + 0.13
+})
+
+# Run pipeline
+predict_fn = main(df)
+
+# Example prediction
+new_data = df.tail(7)
+predicted_yields = predict_fn(new_data)
+print("Predicted Yield Curve:", predicted_yields)
