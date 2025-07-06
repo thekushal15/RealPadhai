@@ -1,3 +1,55 @@
+
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
+
+# Reload + minimal memory preprocessing
+df = pd.read_csv("OIS_SPOT_ZAR.csv")
+df.columns = df.columns.str.strip()
+df['Dates'] = pd.to_datetime(df['Dates'])
+df = df.sort_values("Dates").dropna()
+
+# Define columns
+target_cols = ["1M", "2M", "3M", "4M", "5M", "6M", "7M", "8M", "9M", "1Y", "2Y", "3Y"]
+input_cols = [col for col in df.columns if col not in target_cols + ['Dates']]
+
+# ⏬ Downcast types to save RAM
+df[input_cols] = df[input_cols].apply(pd.to_numeric, downcast="float")
+df[target_cols] = df[target_cols].apply(pd.to_numeric, downcast="float")
+
+# ✅ Step 1: Scale inputs (StandardScaler)
+X_raw = df[input_cols].values.astype(np.float32)
+scaler_X = StandardScaler()
+X_scaled = scaler_X.fit_transform(X_raw)
+
+# ✅ Step 2: Apply PCA
+pca = PCA(n_components=0.97)  # keep 97% variance
+X_pca = pca.fit_transform(X_scaled)
+print(f"PCA reduced input dim to: {X_pca.shape[1]}")
+
+# ✅ Step 3: Scale targets (MinMaxScaler)
+scaler_y = MinMaxScaler()
+y_scaled = scaler_y.fit_transform(df[target_cols].values.astype(np.float32))
+
+# ✅ Step 4: Rebuild DataFrame for sequencing
+pca_cols = [f"PC{i+1}" for i in range(X_pca.shape[1])]
+df_pca = pd.DataFrame(X_pca, columns=pca_cols)
+df_final = pd.concat([df[['Dates']].reset_index(drop=True), df_pca, pd.DataFrame(y_scaled, columns=target_cols)], axis=1)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
