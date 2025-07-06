@@ -1,0 +1,234 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import RobustScaler, MinMaxScaler
+from sklearn.metrics import r2_score, mean_squared_error
+from sklearn.decomposition import PCA
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, TensorDataset
+
+# Set seed for reproducibility
+torch.manual_seed(42)
+np.random.seed(42)
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+class YieldLSTM(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim, dropout=0.2):
+        super().__init__()
+        self.lstm = nn.LSTM(input_dim, hidden_dim, batch_first=True, num_layers=3, dropout=dropout, bidirectional=True)
+        self.layer_norm = nn.LayerNorm(hidden_dim * 2)
+        self.fc = nn.Sequential(
+            nn.Linear(hidden_dim * 2, 128),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(128, output_dim)
+        )
+        self.residual_fc = nn.Linear(hidden_dim * 2, output_dim)  # Residual connection
+
+    def forward(self, x):
+        self.train()  # Always enable dropout (MC Dropout)
+        out, _ = self.lstm(x)
+        out = out[:, -1, :]
+        out = self.layer_norm(out)
+        fc_out = self.fc(out)
+        residual_out = self.residual_fc(out)
+        return fc_out + residual_out  # Add residual connection
+
+def create_sequences(df, input_cols, target_cols, window=14):
+    X_seq, y_seq, D_seq = [], [], []
+    for i in range(len(df) - window):
+        X_seq.append(df[input_cols].iloc[i:i+window].values)
+        y_seq.append(df[target_cols].iloc[i+window].values)
+        D_seq.append(df['Dates'].iloc[i+window])
+    # Add lagged target variables as input features
+    for col in target_cols:
+        df[f"{col}_lag1"] = df[col].shift(1)
+        input_cols.append(f"{col}_lag1")
+    for i in range(len(df) - window):
+        X_seq[i] = np.hstack([X_seq[i], df[[f"{col}_lag1" for col in target_cols]].iloc[i:i+window].values])
+    return np.array(X_seq), np.array(y_seq), np.array(D_seq)
+
+def train_model(model, train_loader, val_loader, optimizer, loss_fn, device, max_epochs=50, patience=10):
+    train_losses, val_losses = [], []
+    best_model, best_val_loss = None, float('inf')
+    wait = 0
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3, verbose=True)
+
+    for epoch in range(max_epochs):
+        model.train()
+        train_loss = 0
+        for xb, yb in train_loader:
+            xb, yb = xb.to(device), yb.to(device)
+            optimizer.zero_grad()
+            preds = model(xb)
+            loss = loss_fn(preds, yb)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # Gradient clipping
+            optimizer.step()
+            train_loss += loss.item()
+        train_losses.append(train_loss)
+
+        model.eval()
+        val_loss = 0
+        with torch.no_grad():
+            for xb, yb in val_loader:
+                xb, yb = xb.to(device), yb.to(device)
+                preds = model(xb)
+                val_loss += loss_fn(preds, yb).item()
+        val_losses.append(val_loss)
+
+        scheduler.step(val_loss)  # Adjust learning rate based on validation loss
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_model = model.state_dict()
+            wait = 0
+        else:
+            wait += 1
+            if wait >= patience:
+                break
+
+    model.load_state_dict(best_model)
+
+    plt.plot(train_losses, label="Train Loss")
+    plt.plot(val_losses, label="Val Loss")
+    plt.title("Loss Curve")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+    return model
+
+def plot_predictions(dates, y_true, y_pred, tenors):
+    for i, tenor in enumerate(tenors):
+        plt.figure(figsize=(10, 4))
+        plt.plot(dates, y_true[:, i], label='Actual')
+        plt.plot(dates, y_pred[:, i], '--', label='Predicted')
+        plt.title(f"Yield: {tenor}")
+        plt.xlabel("Date")
+        plt.ylabel("Yield")
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.show()
+
+def plot_yield_curves(y_true, y_pred, tenors):
+    for i in range(0, len(y_pred), max(1, len(y_pred)//5)):
+        plt.plot(tenors, y_true[i], label=f"True {i}")
+        plt.plot(tenors, y_pred[i], '--', label=f"Pred {i}")
+    plt.title("Yield Curve Shapes")
+    plt.xlabel("Tenor")
+    plt.ylabel("Yield")
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+def predict_with_uncertainty(model, input_tensor, scaler_y, target_cols, n_samples=30):
+    model.eval()
+    preds = []
+    for _ in range(n_samples):
+        with torch.no_grad():
+            pred = model(input_tensor).cpu().numpy()
+            preds.append(pred)
+
+    preds = np.array(preds).squeeze()
+    mean_pred = preds.mean(axis=0)
+    std_pred = preds.std(axis=0)
+
+    lower = scaler_y.inverse_transform([mean_pred - 1.96 * std_pred])[0]
+    upper = scaler_y.inverse_transform([mean_pred + 1.96 * std_pred])[0]
+    mean = scaler_y.inverse_transform([mean_pred])[0]
+
+    plt.plot(target_cols, mean, label='Prediction', marker='o')
+    plt.fill_between(target_cols, lower, upper, alpha=0.3, label='95% CI')
+    plt.title("Predicted Yield Curve with Uncertainty")
+    plt.ylabel("Yield")
+    plt.xlabel("Tenor")
+    plt.grid(True)
+    plt.legend()
+    plt.show()
+
+    return mean, lower, upper
+
+# Pipeline execution
+
+df = pd.read_csv("OIS_SPOT_ZAR.csv")
+df.columns = df.columns.str.strip()
+df['Dates'] = pd.to_datetime(df['Dates'])
+df = df.sort_values("Dates").dropna()
+
+target_cols = ["1M", "2M", "3M", "4M", "5M", "6M", "7M", "8M", "9M", "1Y", "2Y", "3Y"]
+input_cols = [col for col in df.columns if col not in target_cols + ['Dates']]
+
+df[input_cols] = df[input_cols].apply(pd.to_numeric, downcast='float')
+df[target_cols] = df[target_cols].apply(pd.to_numeric, downcast='float')
+
+scaler_X = RobustScaler()
+X_scaled = scaler_X.fit_transform(df[input_cols].values)
+
+pca = PCA(n_components=0.99)
+X_pca = pca.fit_transform(X_scaled)
+pca_cols = [f"PC{i+1}" for i in range(X_pca.shape[1])]
+
+scaler_y = MinMaxScaler()
+y_scaled = scaler_y.fit_transform(df[target_cols].values)
+
+df_final = pd.concat([
+    df[['Dates']].reset_index(drop=True),
+    pd.DataFrame(X_pca, columns=pca_cols),
+    pd.DataFrame(y_scaled, columns=target_cols)
+], axis=1)
+
+X_seq, y_seq, D_seq = create_sequences(df_final, pca_cols, target_cols, window=14)
+
+split = int(0.8 * len(X_seq))
+X_train, X_val = X_seq[:split], X_seq[split:]
+y_train, y_val = y_seq[:split], y_seq[split:]
+dates_val = D_seq[split:]
+
+train_loader = DataLoader(TensorDataset(torch.tensor(X_train, dtype=torch.float32),
+                                        torch.tensor(y_train, dtype=torch.float32)), batch_size=32, shuffle=True)
+
+val_loader = DataLoader(TensorDataset(torch.tensor(X_val, dtype=torch.float32),
+                                      torch.tensor(y_val, dtype=torch.float32)), batch_size=32)
+
+model = YieldLSTM(input_dim=X_seq.shape[2], hidden_dim=128, output_dim=len(target_cols), dropout=0.2).to(device)
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+loss_fn = nn.MSELoss()
+
+model = train_model(model, train_loader, val_loader, optimizer, loss_fn, device)
+
+model.eval()
+with torch.no_grad():
+    X_val_tensor = torch.tensor(X_val, dtype=torch.float32).to(device)
+    y_val_pred_scaled = model(X_val_tensor).cpu().numpy()
+
+y_val_pred = scaler_y.inverse_transform(y_val_pred_scaled)
+y_val_true = scaler_y.inverse_transform(y_val)
+
+r2_val = r2_score(y_val_true, y_val_pred)
+mse_val = mean_squared_error(y_val_true, y_val_pred)
+
+print(f"Validation R²: {r2_val:.4f}")
+print(f"Validation MSE: {mse_val:.6f}")
+
+with torch.no_grad():
+    X_all_tensor = torch.tensor(X_seq, dtype=torch.float32).to(device)
+    y_all_pred_scaled = model(X_all_tensor).cpu().numpy()
+y_all_pred = scaler_y.inverse_transform(y_all_pred_scaled)
+y_all_true = scaler_y.inverse_transform(y_seq)
+
+r2_full = r2_score(y_all_true, y_all_pred)
+mse_full = mean_squared_error(y_all_true, y_all_pred)
+print(f"Full R²: {r2_full:.4f}")
+print(f"Full MSE: {mse_full:.6f}")
+
+plot_predictions(dates_val, y_val_true, y_val_pred, target_cols)
+plot_yield_curves(y_val_true, y_val_pred, target_cols)
+
+sample_input = torch.tensor(X_seq[-1:], dtype=torch.float32).to(device)
+predict_with_uncertainty(model, sample_input, scaler_y, target_cols)
