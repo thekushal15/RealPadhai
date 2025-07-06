@@ -51,3 +51,126 @@ if df is not None:
 else:
     "Data not loaded. Please upload the file named 'ZAR_OIS_Macro_Enhanced.csv'."
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, TensorDataset
+import optuna
+
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.preprocessing import MinMaxScaler
+
+# Step 1: Prepare PCA input and output tensors
+X_pca_reduced = X_pca[:, :21]
+y = df[output_columns].values
+
+# Scale y
+y_scaler = MinMaxScaler()
+y_scaled = y_scaler.fit_transform(y)
+
+# Split (Time Series aware)
+train_size = int(0.8 * len(X_pca_reduced))
+X_train, X_test = X_pca_reduced[:train_size], X_pca_reduced[train_size:]
+y_train, y_test = y_scaled[:train_size], y_scaled[train_size:]
+
+X_train_tensor = torch.tensor(X_train, dtype=torch.float32)
+X_test_tensor = torch.tensor(X_test, dtype=torch.float32)
+y_train_tensor = torch.tensor(y_train, dtype=torch.float32)
+y_test_tensor = torch.tensor(y_test, dtype=torch.float32)
+
+train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
+test_dataset = TensorDataset(X_test_tensor, y_test_tensor)
+
+# Step 2: Define MLP model
+class YieldMLP(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim, dropout):
+        super(YieldMLP, self).__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, output_dim)
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+# Step 3: Define optuna objective
+def objective(trial):
+    hidden_dim = trial.suggest_int("hidden_dim", 64, 256)
+    dropout = trial.suggest_float("dropout", 0.1, 0.5)
+    lr = trial.suggest_float("lr", 1e-4, 1e-2, log=True)
+
+    model = YieldMLP(input_dim=21, hidden_dim=hidden_dim, output_dim=y.shape[1], dropout=dropout)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    loss_fn = nn.MSELoss()
+
+    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+
+    model.train()
+    for epoch in range(25):
+        for xb, yb in train_loader:
+            optimizer.zero_grad()
+            pred = model(xb)
+            loss = loss_fn(pred, yb)
+            loss.backward()
+            optimizer.step()
+
+    # Evaluate
+    model.eval()
+    with torch.no_grad():
+        preds_scaled = model(X_test_tensor).numpy()
+    preds = y_scaler.inverse_transform(preds_scaled)
+    true = y[train_size:]
+    return -r2_score(true, preds)
+
+# Step 4: Tune and train best model
+study = optuna.create_study(direction="minimize")
+study.optimize(objective, n_trials=25)
+
+best_params = study.best_trial.params
+best_model = YieldMLP(21, best_params['hidden_dim'], y.shape[1], best_params['dropout'])
+optimizer = torch.optim.Adam(best_model.parameters(), lr=best_params['lr'])
+loss_fn = nn.MSELoss()
+train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+
+for epoch in range(40):
+    for xb, yb in train_loader:
+        optimizer.zero_grad()
+        pred = best_model(xb)
+        loss = loss_fn(pred, yb)
+        loss.backward()
+        optimizer.step()
+
+# Step 5: Evaluate on full dataset
+best_model.eval()
+with torch.no_grad():
+    all_preds_scaled = best_model(torch.tensor(X_pca_reduced, dtype=torch.float32)).numpy()
+    all_preds = y_scaler.inverse_transform(all_preds_scaled)
+
+r2_test = r2_score(y[train_size:], all_preds[train_size:])
+r2_full = r2_score(y, all_preds)
+mse_test = mean_squared_error(y[train_size:], all_preds[train_size:])
+mse_full = mean_squared_error(y, all_preds)
+
+r2_test, r2_full, mse_test, mse_full
+
+
+
