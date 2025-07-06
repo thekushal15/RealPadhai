@@ -1,0 +1,426 @@
+import pandas as pd
+import numpy as np
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, TensorDataset
+import optuna
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
+from sklearn.decomposition import PCA
+import matplotlib.pyplot as plt
+import seaborn as sns
+from copy import deepcopy
+import uuid
+
+# Set random seed for reproducibility
+torch.manual_seed(42)
+np.random.seed(42)
+
+# Step 1: Load and Preprocess Data
+def load_and_preprocess_data(file_path="OIS_SPOT_ZAR.csv"):
+    try:
+        df = pd.read_csv(file_path)
+        df.columns = df.columns.str.strip()
+        df['Dates'] = pd.to_datetime(df['Dates'])
+        df = df.sort_values('Dates')
+        df.dropna(inplace=True)
+        
+        # Define input and output columns
+        output_columns = ["1M", "2M", "3M", "4M", "5M", "6M", "7M", "8M", "9M", "1Y", "2Y", "3Y"]
+        input_columns = [col for col in df.columns if col not in output_columns + ["Dates"]]
+        
+        # Normalize input features
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(df[input_columns])
+        
+        # Apply PCA
+        pca = PCA()
+        X_pca = pca.fit_transform(X_scaled)
+        
+        # Select components explaining 97% variance
+        explained_var = np.cumsum(pca.explained_variance_ratio_) * 100
+        num_components = np.argmax(explained_var >= 97) + 1
+        X_pca_reduced = X_pca[:, :num_components]
+        
+        # Plot Scree Plot
+        plt.figure(figsize=(10, 6))
+        plt.plot(explained_var, marker='o', linestyle='--', label='Cumulative Explained Variance')
+        plt.axhline(97, color='r', linestyle=':', label='97% Threshold')
+        plt.axvline(num_components - 1, color='g', linestyle=':', label=f'{num_components} Components')
+        plt.title('Scree Plot: PCA Cumulative Explained Variance')
+        plt.xlabel('Number of Components')
+        plt.ylabel('Explained Variance (%)')
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig("scree_plot.png")
+        plt.close()
+        
+        return df, X_pca_reduced, output_columns, df['Dates']
+    except FileNotFoundError:
+        print("Data not loaded. Please provide the file 'OIS_SPOT_ZAR.csv'.")
+        return None, None, None, None
+
+# Step 2: Outlier Filtering
+def filter_outliers(df, output_columns):
+    """Remove dates where all 12 output yields show extreme moves."""
+    yield_changes = df[output_columns].diff().abs()
+    threshold = yield_changes.quantile(0.97)
+    extreme_moves = (yield_changes > threshold).all(axis=1)
+    return df[~extreme_moves]
+
+# Step 3: Prepare Time Series Data
+def prepare_time_series_data(X_pca, y, seq_length=7):
+    """Create sequences for time series model."""
+    X_seq, y_seq = [], []
+    for i in range(len(X_pca) - seq_length):
+        X_seq.append(X_pca[i:i+seq_length].flatten())
+        y_seq.append(y[i+seq_length])
+    return np.array(X_seq), np.array(y_seq)
+
+# Step 4: Define Enhanced MLP Model
+class EnhancedYieldMLP(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim, dropout, num_layers=3):
+        super(EnhancedYieldMLP, self).__init__()
+        layers = []
+        current_dim = input_dim
+        for _ in range(num_layers):
+            layers.extend([
+                nn.Linear(current_dim, hidden_dim),
+                nn.BatchNorm1d(hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout)
+            ])
+            current_dim = hidden_dim
+        layers.append(nn.Linear(hidden_dim, output_dim))
+        self.net = nn.Sequential(*layers)
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            nn.init.xavier_uniform_(module.weight)
+            nn.init.zeros_(module.bias)
+
+    def forward(self, x, training=False):
+        if training:
+            self.train()
+        else:
+            self.eval()
+        return self.net(x)
+
+# Step 5: Training Function with Early Stopping
+def train_model(model, train_loader, val_loader, optimizer, loss_fn, device, max_epochs=100, patience=10):
+    best_val_loss = float('inf')
+    best_model_state = None
+    patience_counter = 0
+
+    for epoch in range(max_epochs):
+        model.train()
+        train_loss = 0
+        for xb, yb in train_loader:
+            xb, yb = xb.to(device), yb.to(device)
+            optimizer.zero_grad()
+            pred = model(xb, training=True)
+            loss = loss_fn(pred, yb)
+            loss.backward()
+            optimizer.step()
+            train_loss += loss.item()
+        
+        # Validation
+        model.eval()
+        val_loss = 0
+        with torch.no_grad():
+            for xb, yb in val_loader:
+                xb, yb = xb.to(device), yb.to(device)
+                pred = model(xb)
+                val_loss += loss_fn(pred, yb).item()
+        
+        val_loss /= len(val_loader)
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_model_state = deepcopy(model.state_dict())
+            patience_counter = 0
+        else:
+            patience_counter += 1
+            if patience_counter >= patience:
+                print(f"Early stopping at epoch {epoch}")
+                break
+    
+    model.load_state_dict(best_model_state)
+    return model
+
+# Step 6: Monte Carlo Dropout for Uncertainty
+def mc_dropout_predictions(model, X_tensor, n_samples=100):
+    model.train()  # Enable dropout during inference
+    predictions = []
+    for _ in range(n_samples):
+        with torch.no_grad():
+            pred = model(X_tensor, training=True).cpu().numpy()
+            predictions.append(pred)
+    predictions = np.stack(predictions)
+    mean_preds = np.mean(predictions, axis=0)
+    std_preds = np.std(predictions, axis=0)
+    return mean_preds, std_preds
+
+# Step 7: Objective Function for Optuna
+def objective(trial, X_train, y_train, X_val, y_val, input_dim, output_dim, time_series=False):
+    hidden_dim = trial.suggest_int("hidden_dim", 64, 256)
+    dropout = trial.suggest_float("dropout", 0.1, 0.5)
+    lr = trial.suggest_float("lr", 1e-4, 1e-2, log=True)
+    num_layers = trial.suggest_int("num_layers", 2, 5)
+    batch_size = trial.suggest_categorical("batch_size", [32, 64, 128])
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = EnhancedYieldMLP(
+        input_dim=input_dim,
+        hidden_dim=hidden_dim,
+        output_dim=output_dim,
+        dropout=dropout,
+        num_layers=num_layers
+    ).to(device)
+    
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
+    loss_fn = nn.MSELoss()
+    
+    train_dataset = TensorDataset(
+        torch.tensor(X_train, dtype=torch.float32),
+        torch.tensor(y_train, dtype=torch.float32)
+    )
+    val_dataset = TensorDataset(
+        torch.tensor(X_val, dtype=torch.float32),
+        torch.tensor(y_val, dtype=torch.float32)
+    )
+    
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size)
+    
+    model = train_model(model, train_loader, val_loader, optimizer, loss_fn, device)
+    
+    model.eval()
+    with torch.no_grad():
+        preds_scaled = model(torch.tensor(X_val, dtype=torch.float32).to(device)).cpu().numpy()
+    preds = y_scaler.inverse_transform(preds_scaled)
+    true = y_scaler.inverse_transform(y_val)
+    r2 = r2_score(true, preds)
+    
+    return -r2  # Maximize R²
+
+# Step 8: Visualization Functions
+def plot_actual_vs_predicted(y_true, y_pred, dates, title, filename):
+    plt.figure(figsize=(12, 6))
+    for i in range(y_true.shape[1]):
+        plt.plot(dates, y_true[:, i], label=f"Actual Tenor {output_columns[i]}")
+        plt.plot(dates, y_pred[:, i], '--', label=f"Predicted Tenor {output_columns[i]}")
+    plt.title(title)
+    plt.xlabel("Date")
+    plt.ylabel("Yield")
+    plt.legend()
+    plt.savefig(filename)
+    plt.close()
+
+def plot_confidence_intervals(y_true, mean_preds, std_preds, dates, title, filename):
+    plt.figure(figsize=(12, 6))
+    for i in range(y_true.shape[1]):
+        plt.plot(dates, y_true[:, i], label=f"Actual Tenor {output_columns[i]}")
+        plt.plot(dates, mean_preds[:, i], '--', label=f"Predicted Tenor {output_columns[i]}")
+        plt.fill_between(
+            dates,
+            mean_preds[:, i] - 1.96 * std_preds[:, i],
+            mean_preds[:, i] + 1.96 * std_preds[:, i],
+            alpha=0.2
+        )
+    plt.title(title)
+    plt.xlabel("Date")
+    plt.ylabel("Yield")
+    plt.legend()
+    plt.savefig(filename)
+    plt.close()
+
+def plot_tenor_spreads(y_true, y_pred, tenors, filename):
+    spreads = y_true - y_pred
+    plt.figure(figsize=(12, 6))
+    sns.boxplot(data=spreads)
+    plt.xticks(np.arange(len(tenors)), tenors)
+    plt.title("Tenor-wise Prediction Spreads")
+    plt.ylabel("Prediction Error")
+    plt.savefig(filename)
+    plt.close()
+
+def plot_r2_over_time(y_true, y_pred, dates, filename):
+    r2_scores = [r2_score(y_true[i:i+1], y_pred[i:i+1]) for i in range(len(y_true))]
+    plt.figure(figsize=(12, 6))
+    plt.plot(dates, r2_scores)
+    plt.title("R² Score Over Time")
+    plt.xlabel("Date")
+    plt.ylabel("R² Score")
+    plt.savefig(filename)
+    plt.close()
+
+# Step 9: Main Execution
+def main():
+    global y_scaler, output_columns
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # Load and preprocess data
+    df, X_pca_reduced, output_columns, dates = load_and_preprocess_data()
+    if df is None:
+        return
+    
+    # Filter outliers
+    df_filtered = filter_outliers(df, output_columns)
+    X_pca_filtered = X_pca_reduced[df_filtered.index]
+    y = df_filtered[output_columns].values
+    dates_filtered = dates[df_filtered.index]
+    
+    # Scale y
+    y_scaler = MinMaxScaler()
+    y_scaled = y_scaler.fit_transform(y)
+    
+    # Split data
+    train_size = int(0.8 * len(X_pca_filtered))
+    X_train, X_test = X_pca_filtered[:train_size], X_pca_filtered[train_size:]
+    y_train, y_test = y_scaled[:train_size], y_scaled[train_size:]
+    dates_train, dates_test = dates_filtered[:train_size], dates_filtered[train_size:]
+    
+    # Time Series Data
+    seq_length = 7
+    X_seq, y_seq = prepare_time_series_data(X_pca_filtered, y_scaled, seq_length)
+    train_size_seq = int(0.8 * len(X_seq))
+    X_train_seq, X_test_seq = X_seq[:train_size_seq], X_seq[train_size_seq:]
+    y_train_seq, y_test_seq = y_seq[:train_size_seq], y_seq[train_size_seq:]
+    dates_seq = dates_filtered[seq_length:][train_size_seq:]
+    
+    # Iterative Tuning Loop
+    best_r2_diff = float('inf')
+    best_model = None
+    best_params = None
+    best_type = None
+    max_iterations = 5
+    
+    for iteration in range(max_iterations):
+        # Functional Mapping Model
+        study_func = optuna.create_study(direction="minimize")
+        study_func.optimize(
+            lambda trial: objective(trial, X_train, y_train, X_test, y_test, input_dim=X_pca_reduced.shape[1], output_dim=y.shape[1]),
+            n_trials=25
+        )
+        
+        # Time Series Model
+        study_ts = optuna.create_study(direction="minimize")
+        study_ts.optimize(
+            lambda trial: objective(trial, X_train_seq, y_train_seq, X_test_seq, y_test_seq, 
+                                 input_dim=X_pca_reduced.shape[1]*seq_length, output_dim=y.shape[1], time_series=True),
+            n_trials=25
+        )
+        
+        # Evaluate Functional Mapping
+        model_func = EnhancedYieldMLP(
+            input_dim=X_pca_reduced.shape[1],
+            hidden_dim=study_func.best_params['hidden_dim'],
+            output]s_dim=y.shape[1],
+            dropout=study_func.best_params['dropout'],
+            num_layers=study_func.best_params['num_layers']
+        ).to(device)
+        
+        train_loader = DataLoader(
+            TensorDataset(torch.tensor(X_train, dtype=torch.float32), torch.tensor(y_train, dtype=torch.float32)),
+            batch_size=study_func.best_params['batch_size'],
+            shuffle=True
+        )
+        val_loader = DataLoader(
+            TensorDataset(torch.tensor(X_test, dtype=torch.float32), torch.tensor(y_test, dtype=torch.float32)),
+            batch_size=study_func.best_params['batch_size']
+        )
+        
+        optimizer = torch.optim.AdamW(model_func.parameters(), lr=study_func.best_params['lr'], weight_decay=1e-5)
+        model_func = train_model(model_func, train_loader, val_loader, optimizer, nn.MSELoss(), device)
+        
+        # Evaluate Time Series
+        model_ts = EnhancedYieldMLP(
+            input_dim=X_pca_reduced.shape[1]*seq_length,
+            hidden_dim=study_ts.best_params['hidden_dim'],
+            output_dim=y.shape[1],
+            dropout=study_ts.best_params['dropout'],
+            num_layers=study_ts.best_params['num_layers']
+        ).to(device)
+        
+        train_loader_ts = DataLoader(
+            TensorDataset(torch.tensor(X_train_seq, dtype=torch.float32), torch.tensor(y_train_seq, dtype=torch.float32)),
+            batch_size=study_ts.best_params['batch_size'],
+            shuffle=True
+        )
+        val_loader_ts = DataLoader(
+            TensorDataset(torch.tensor(X_test_seq, dtype=torch.float32), torch.tensor(y_test_seq, dtype=torch.float32)),
+            batch_size=study_ts.best_params['batch_size']
+        )
+        
+        optimizer_ts = torch.optim.AdamW(model_ts.parameters(), lr=study_ts.best_params['lr'], weight_decay=1e-5)
+        model_ts = train_model(model_ts, train_loader_ts, val_loader_ts, optimizer_ts, nn.MSELoss(), device)
+        
+        # Evaluate both models
+        model_func.eval()
+        with torch.no_grad():
+            preds_func_scaled = model_func(torch.tensor(X_pca_filtered, dtype=torch.float32).to(device)).cpu().numpy()
+        preds_func = y_scaler.inverse_transform(preds_func_scaled)
+        
+        model_ts.eval()
+        with torch.no_grad():
+            preds_ts_scaled = model_ts(torch.tensor(X_seq, dtype=torch.float32).to(device)).cpu().numpy()
+        preds_ts = y_scaler.inverse_transform(preds_ts_scaled)
+        
+        r2_test_func = r2_score(y[train_size:], preds_func[train_size:])
+        r2_full_func = r2_score(y, preds_func)
+        r2_test_ts = r2_score(y[train_size_seq:], preds_ts[train_size_seq-seq_length:])
+        r2_full_ts = r2_score(y[seq_length:], preds_ts)
+        
+        r2_diff_func = abs(r2_test_func - r2_full_func)
+        r2_diff_ts = abs(r2_test_ts - r2_full_ts)
+        
+        if r2_diff_func < best_r2_diff:
+            best_r2_diff = r2_diff_func
+            best_model = model_func
+            best_params = study_func.best_params
+            best_type = "Functional"
+            best_preds = preds_func
+            best_r2_test = r2_test_func
+            best_r2_full = r2_full_func
+            best_mse_test = mean_squared_error(y[train_size:], preds_func[train_size:])
+            best_mse_full = mean_squared_error(y, preds_func)
+        
+        if r2_diff_ts < best_r2_diff:
+            best_r2_diff = r2_diff_ts
+            best_model = model_ts
+            best_params = study_ts.best_params
+            best_type = "Time Series"
+            best_preds = preds_ts
+            best_r2_test = r2_test_ts
+            best_r2_full = r2_full_ts
+            best_mse_test = mean_squared_error(y[train_size_seq:], preds_ts[train_size_seq-seq_length:])
+            best_mse_full = mean_squared_error(y[seq_length:], preds_ts)
+        
+        if best_r2_diff < 0.01:  # Stop if R² difference is small enough
+            break
+    
+    # Monte Carlo Dropout for Uncertainty
+    if best_type == "Functional":
+        mean_preds, std_preds = mc_dropout_predictions(best_model, torch.tensor(X_pca_filtered, dtype=torch.float32).to(device))
+    else:
+        mean_preds, std_preds = mc_dropout_predictions(best_model, torch.tensor(X_seq, dtype=torch.float32).to(device))
+    mean_preds = y_scaler.inverse_transform(mean_preds)
+    
+    # Visualizations
+    plot_actual_vs_predicted(y, best_preds, dates_filtered, "Actual vs Predicted Yield Curves", "yield_curves.png")
+    plot_confidence_intervals(y, mean_preds, std_preds, dates_filtered, "Yield Curves with Confidence Intervals", "confidence_intervals.png")
+    plot_tenor_spreads(y, best_preds, output_columns, "tenor_spreads.png")
+    plot_r2_over_time(y, best_preds, dates_filtered, "r2_over_time.png")
+    
+    print(f"Best Model: {best_type}")
+    print(f"Best Parameters: {best_params}")
+    print(f"R² Test: {best_r2_test:.4f}")
+    print(f"R² Full: {best_r2_full:.4f}")
+    print(f"MSE Test: {best_mse_test:.4f}")
+    print(f"MSE Full: {best_mse_full:.4f}")
+
+if __name__ == "__main__":
+    main()
