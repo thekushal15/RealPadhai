@@ -155,6 +155,98 @@ for date in mpc_dates:
 
 
 
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# STEP 1: Load data
+df = pd.read_csv("OIS_Curve.csv", parse_dates=["Dates"])
+
+# STEP 2: Compute forward OIS changes
+df['Fwd_OIS_after_6M_1W_change'] = df['Fwd_OIS_after_6M'] - df['Fwd_OIS_after_6M'].shift(5)
+
+# STEP 3: Detect if Market is Pricing a Rate Cut (>20bps drop in 1W)
+df['Market_Pricing_Cut'] = df['Fwd_OIS_after_6M_1W_change'] < -0.20
+
+# STEP 4: Realized CB Rate after 6 months (approx 126 trading days)
+df['CB_Rate_after_6M'] = df['CB Rate'].shift(-126)
+
+# STEP 5: Forecasting error → Implied vs Actual
+df['Fwd_vs_Realized_Error'] = df['Fwd_OIS_after_6M'] - df['CB_Rate_after_6M']
+
+# STEP 6: Reversion check (within 2 weeks = 10 days)
+df['Fwd_OIS_after_6M_in_2W'] = df['Fwd_OIS_after_6M'].shift(-10)
+df['Fwd_Reversion_2W'] = df['Fwd_OIS_after_6M_in_2W'] - df['Fwd_OIS_after_6M']
+df['Market_Reverted'] = df['Fwd_Reversion_2W'].abs() > 0.15
+
+# STEP 7: Extra engineered features
+df['Rolling_Error_30D'] = df['Fwd_vs_Realized_Error'].rolling(30).mean()
+df['Zscore_ΔFwd_6M'] = (
+    df['Fwd_OIS_after_6M_1W_change'] - df['Fwd_OIS_after_6M_1W_change'].rolling(20).mean()
+) / df['Fwd_OIS_after_6M_1W_change'].rolling(20).std()
+
+
+# STEP 8: Scoring Function
+def calculate_market_accuracy_score(df):
+    correct = (df['Fwd_vs_Realized_Error'].abs() <= 0.10)
+    reverted = (~correct) & df['Market_Reverted']
+    wrong = (~correct) & (~df['Market_Reverted'])
+
+    score = (
+        correct.sum() * 2 +
+        reverted.sum() * 1 +
+        wrong.sum() * 0
+    )
+    total = len(df.dropna(subset=['Fwd_vs_Realized_Error'])) * 2
+    return round(score / total * 100, 2)
+
+
+# STEP 9: Plotting
+def plot_market_expectation_vs_reality(df, n=200):
+    plt.figure(figsize=(14, 6))
+    sns.lineplot(x='Dates', y='Fwd_OIS_after_6M', data=df.tail(n), label='Fwd OIS (6M Ahead)')
+    sns.lineplot(x='Dates', y='CB_Rate_after_6M', data=df.tail(n), label='CB Rate (6M Later)')
+    plt.title('Market Pricing vs Realized CB Rate (6M Horizon)')
+    plt.xlabel('Date')
+    plt.ylabel('Rate')
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_error_and_flags(df, n=200):
+    plt.figure(figsize=(14, 5))
+    sns.lineplot(x='Dates', y='Fwd_vs_Realized_Error', data=df.tail(n), label='Fwd vs Realized Error')
+    sns.scatterplot(
+        x='Dates', y='Fwd_vs_Realized_Error',
+        data=df[df['Market_Pricing_Cut'] & df['Market_Reverted']],
+        color='green', label='Cut Priced + Reverted', marker='o', s=60
+    )
+    sns.scatterplot(
+        x='Dates', y='Fwd_vs_Realized_Error',
+        data=df[df['Market_Pricing_Cut'] & ~df['Market_Reverted']],
+        color='red', label='Cut Priced + No Revert', marker='X', s=60
+    )
+    plt.axhline(0, color='gray', linestyle='--')
+    plt.title('Forward Implied Error & Market Behavior')
+    plt.xlabel('Date')
+    plt.ylabel('Error (bps)')
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+
+
+# STEP 10: Execution
+score = calculate_market_accuracy_score(df)
+print(f"📊 Market Accuracy Score (Fwd vs Realized, 6M): {score}%")
+
+# Optional visualizations
+# plot_market_expectation_vs_reality(df)
+# plot_error_and_flags(df)
+
+# Final dataframe available as: df
 
 
 
