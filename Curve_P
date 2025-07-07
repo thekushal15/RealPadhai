@@ -1,0 +1,66 @@
+import pandas as pd
+import numpy as np
+from dateutil.relativedelta import relativedelta
+from scipy.interpolate import interp1d
+
+# Load the data
+df = pd.read_csv("OIS_Curve.csv")
+
+# Convert 'Dates' to datetime
+df['Dates'] = pd.to_datetime(df['Dates'])
+
+# Step 1: Shift CB rate to future horizons
+for m in range(1, 7):
+    df[f'CB_Rate_after_{m}M'] = df.set_index('Dates')['CB Rate'].shift(-1)  # temp
+    for idx in df.index:
+        target_date = df.loc[idx, 'Dates'] + relativedelta(months=m)
+        match = df[df['Dates'] == target_date]
+        if not match.empty:
+            df.at[idx, f'CB_Rate_after_{m}M'] = match['CB Rate'].values[0]
+        else:
+            df.at[idx, f'CB_Rate_after_{m}M'] = np.nan
+
+# Step 2: Create maturity tenors in years
+tenors = ['1M', '2M', '3M', '4M', '5M', '6M']
+tenor_map = {'1M': 1/12, '2M': 2/12, '3M': 3/12, '4M': 4/12, '5M': 5/12, '6M': 6/12}
+
+# Step 3: Compute discount factors and implied forward O/N rates
+def compute_implied_forward_on(row):
+    df_result = {}
+    
+    # Step 3a: Calculate log(DF) from OIS rate
+    times = np.array([tenor_map[t] for t in tenors])
+    rates = np.array([row[t] / 100 for t in tenors])  # convert to decimal
+    
+    log_df = -rates * times
+    interp_func = interp1d(times, log_df, kind='cubic', fill_value="extrapolate")
+    
+    for m in range(1, 7):
+        t1 = tenor_map[f'{m}M']
+        t2 = t1 + 1/365  # one day ahead
+        
+        log_df1 = interp_func(t1)
+        log_df2 = interp_func(t2)
+        
+        df1 = np.exp(log_df1)
+        df2 = np.exp(log_df2)
+        
+        forward_on = (df1 / df2 - 1) * 365  # annualized O/N rate
+        df_result[f'Fwd_OIS_after_{m}M'] = forward_on * 100  # back to %
+    
+    return pd.Series(df_result)
+
+# Apply across dataframe
+implied_forward_rates = df.apply(compute_implied_forward_on, axis=1)
+df = pd.concat([df, implied_forward_rates], axis=1)
+
+# Step 4: Compute difference columns
+for m in range(1, 7):
+    df[f'Diff_Mkt_CB_{m}M'] = df[f'Fwd_OIS_after_{m}M'] - df[f'CB_Rate_after_{m}M']
+
+# Step 5: O/N vs CB Rate today
+df['Spread_OIS_vs_CB'] = df['O/N Intere'] - df['CB Rate']
+
+# Save to output
+df.to_csv("OIS_vs_CB_Analysis.csv", index=False)
+print("✅ Analysis saved to 'OIS_vs_CB_Analysis.csv'")
