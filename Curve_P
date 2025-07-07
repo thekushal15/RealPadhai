@@ -1,5 +1,121 @@
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
+from dateutil.relativedelta import relativedelta
+from scipy.interpolate import interp1d
+
+# Load the data
+df = pd.read_csv("OIS_Curve.csv")
+df['Dates'] = pd.to_datetime(df['Dates'])
+
+# Define CB rate policy
+policy_change_date = pd.Timestamp("2025-07-31")
+
+# Step 1: Extend CB Rate into the future if missing
+df['CB Rate'] = np.where(
+    df['Dates'] >= policy_change_date,
+    7.00,
+    7.25
+)
+
+# Step 2: Recompute CB_Rate_after_*M
+for m in range(1, 7):
+    colname = f'CB_Rate_after_{m}M'
+    df[colname] = np.nan
+    for idx in df.index:
+        target_date = df.loc[idx, 'Dates'] + relativedelta(months=m)
+        match = df[df['Dates'] == target_date]
+        if not match.empty:
+            df.at[idx, colname] = match['CB Rate'].values[0]
+        else:
+            # fallback: if future, then apply same rate logic
+            df.at[idx, colname] = 7.00 if target_date >= policy_change_date else 7.25
+
+# Step 3: Recompute Fwd OIS
+tenors = ['1M', '2M', '3M', '4M', '5M', '6M']
+tenor_map = {'1M': 1/12, '2M': 2/12, '3M': 3/12, '4M': 4/12, '5M': 5/12, '6M': 6/12}
+
+def compute_implied_forward_on(row):
+    df_result = {}
+    times = np.array([tenor_map[t] for t in tenors])
+    rates = np.array([row[t] / 100 for t in tenors])
+    log_df = -rates * times
+    interp_func = interp1d(times, log_df, kind='cubic', fill_value="extrapolate")
+    for m in range(1, 7):
+        t1 = tenor_map[f'{m}M']
+        t2 = t1 + 1/365
+        log_df1 = interp_func(t1)
+        log_df2 = interp_func(t2)
+        df1 = np.exp(log_df1)
+        df2 = np.exp(log_df2)
+        forward_on = (df1 / df2 - 1) * 365
+        df_result[f'Fwd_OIS_after_{m}M'] = forward_on * 100
+    return pd.Series(df_result)
+
+implied_forward_rates = df.apply(compute_implied_forward_on, axis=1)
+df.update(implied_forward_rates)
+
+# Step 4: Diff Columns
+for m in range(1, 7):
+    df[f'Diff_Mkt_CB_{m}M'] = df[f'Fwd_OIS_after_{m}M'] - df[f'CB_Rate_after_{m}M']
+
+# Step 5: Spread today
+df['Spread_OIS_vs_CB'] = df['O/N Intere'] - df['CB Rate']
+
+# --- Visualization Time! ---
+
+# Step 6.1: CB vs Market OIS Fwd (for each tenor)
+for m in range(1, 7):
+    plt.figure(figsize=(12, 5))
+    plt.plot(df['Dates'], df[f'Fwd_OIS_after_{m}M'], label=f"Fwd OIS after {m}M", color='blue')
+    plt.plot(df['Dates'], df[f'CB_Rate_after_{m}M'], label=f"CB Rate after {m}M", color='green')
+    plt.title(f"Market vs CB: Forward OIS vs CB Rate (after {m}M)")
+    plt.ylabel("Rate (%)")
+    plt.xlabel("Date")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(f"plot_cb_vs_ois_{m}M.png")
+    plt.close()
+
+# Step 6.2: Spread ZARONIA vs CB Rate with CB change highlights
+plt.figure(figsize=(12, 5))
+plt.plot(df['Dates'], df['Spread_OIS_vs_CB'], label="ZARONIA - CB Rate", color='darkred')
+plt.axvline(policy_change_date, color='black', linestyle='--', label="Policy Change")
+plt.title("ZARONIA vs CB Rate Spread")
+plt.xlabel("Date")
+plt.ylabel("Spread (%)")
+plt.grid(True)
+plt.legend()
+plt.tight_layout()
+plt.savefig("spread_zaronia_vs_cb.png")
+plt.close()
+
+# Step 6.3: Spreads: Diff_Mkt_CB_{m}M (market - CB) vs time
+for m in range(1, 7):
+    plt.figure(figsize=(12, 5))
+    plt.plot(df['Dates'], df[f'Diff_Mkt_CB_{m}M'], label=f"Market - CB after {m}M", color='purple')
+    plt.axvline(policy_change_date, color='black', linestyle='--', label="Policy Change")
+    plt.title(f"Market Pricing Surprise (after {m}M)")
+    plt.ylabel("bps")
+    plt.xlabel("Date")
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(f"spread_diff_mkt_cb_{m}M.png")
+    plt.close()
+
+print("✅ All updated, plots saved.")
+
+
+
+
+
+
+
+
+import pandas as pd
+import numpy as np
 from dateutil.relativedelta import relativedelta
 from scipy.interpolate import interp1d
 
