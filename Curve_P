@@ -1,3 +1,7 @@
+=IF(ROW()<6, "", IF(ABS(B6 - B1) > 0.0022, IF(B6 - B1 > 0, "Priced Hike", "Priced Cut"), ""))
+
+
+
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
