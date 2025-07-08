@@ -1,3 +1,47 @@
+def plot_market_window(df, target_date, days_before=60, days_after=0):
+    """
+    Plot OIS Fwd vs CB Rate around a target date.
+    Params:
+        df: DataFrame with 'Dates', 'Fwd_OIS_after_6M', 'CB_Rate_after_6M'
+        target_date: string or datetime, date of interest (e.g., MPC date)
+        days_before: days before the target date to include
+        days_after: days after the target date to include
+    """
+    target_date = pd.to_datetime(target_date)
+    start = target_date - pd.Timedelta(days=days_before)
+    end = target_date + pd.Timedelta(days=days_after)
+
+    subset = df[(df['Dates'] >= start) & (df['Dates'] <= end)].copy()
+
+    plt.figure(figsize=(12, 5))
+    sns.lineplot(x='Dates', y='Fwd_OIS_after_6M', data=subset, label='Fwd OIS (6M Ahead)')
+    sns.lineplot(x='Dates', y='CB_Rate_after_6M', data=subset, label='CB Rate (6M Later)')
+    plt.axvline(target_date, color='red', linestyle='--', label='MPC Date')
+    plt.title(f"Fwd OIS vs CB Rate: {days_before}D Before and {days_after}D After {target_date.date()}")
+    plt.xlabel("Date")
+    plt.ylabel("Rate")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+
+
+plot_market_window(df, "2023-07-20", days_before=60, days_after=0)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 =IF(ROW()<6, "", IF(ABS(B6 - B1) > 0.0022, IF(B6 - B1 > 0, "Priced Hike", "Priced Cut"), ""))
 
 
