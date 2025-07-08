@@ -2,40 +2,36 @@ from scipy.interpolate import interp1d
 import numpy as np
 import pandas as pd
 
-tenor_map_cb = {f'{i}M': i * 30 for i in range(1, 7)}  # days approx
-cb_cols = [f'CB_Rate_after_{i}M' for i in range(1, 7)]
+# Define mapping: months to days
+tenor_day_map = {'0M': 0, '1M': 30, '2M': 60, '3M': 90, '4M': 120, '5M': 150, '6M': 180}
+cb_tenors = ['0M'] + [f'{i}M' for i in range(1, 7)]
 
-def compute_cb_implied_ois_curve_on_basis(row):
-    result = {}
-    
-    # Step 1: build the interpolation function on CB Rate
-    tenors_days = np.array([tenor_map_cb[f'{i}M'] for i in range(1, 7)])
-    cb_rates = np.array([row[col] / 100 for col in cb_cols])  # Convert to decimal
+def build_cb_zero_curve(row):
+    # Step 1: Create tenor-to-rate mapping
+    times = np.array([tenor_day_map[t] for t in cb_tenors])
+    rates = np.array([row['CB Rate']] + [row[f'CB_Rate_after_{i}M'] for i in range(1, 7)]) / 100
 
-    cb_interp_func = interp1d(tenors_days, cb_rates, kind='cubic', fill_value='extrapolate')
+    # Step 2: Interpolate daily CB rates
+    cb_interp_func = interp1d(times, rates, kind='cubic', fill_value='extrapolate')
 
-    # Step 2: loop over each target tenor
+    results = {}
+
     for m in range(1, 7):
-        horizon = tenor_map_cb[f'{m}M']
-        df_val = 1.0
-        
-        # Step 3: Compound daily using interpolated CB rate
-        for day in range(1, horizon + 1):
-            r_daily = cb_interp_func(day)
-            df_val *= 1 / (1 + r_daily * (1 / 360))  # daily compounding
+        T = tenor_day_map[f'{m}M']  # target horizon in days
+        df = 1.0
+        for t in range(1, T + 1):
+            r_daily = cb_interp_func(t)
+            df *= 1 / (1 + r_daily * (1 / 360))  # daily O/N compounding
 
-        # Step 4: Get DF(t), DF(t+1), and compute implied 1-day fwd rate
-        df_t = df_val
-        r_daily_next = cb_interp_func(horizon + 1)
-        df_t1 = df_t * (1 / (1 + r_daily_next * (1 / 360)))
+        # Step 3: Convert DF to annualized spot rate
+        spot_rate = (1 / df - 1) * (360 / T)
+        results[f'CB_Zero_Spot_{m}M'] = spot_rate * 100  # in %
 
-        fwd_on = (df_t / df_t1 - 1) * 360
-        result[f'CB_Implied_OIS_{m}M'] = fwd_on * 100
+    return pd.Series(results)
 
-    return pd.Series(result)
+cb_zero_curve = df.apply(build_cb_zero_curve, axis=1)
+df.update(cb_zero_curve)
 
-# Apply on your DataFrame
-cb_implied_ois_on = df.apply(compute_cb_implied_ois_curve_on_basis, axis=1)
 
 
 
