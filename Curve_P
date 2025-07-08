@@ -1,3 +1,39 @@
+from scipy.interpolate import interp1d
+import numpy as np
+import pandas as pd
+
+# Map months to year fraction
+tenor_map_cb = {f'{i}M': i / 12 for i in range(1, 7)}
+cb_forward_cols = [f'CB_Rate_after_{i}M' for i in range(1, 7)]
+
+def compute_cb_implied_ois_curve(row):
+    result = {}
+    times = np.array([tenor_map_cb[t] for t in tenor_map_cb])
+    cb_rates = np.array([row[f'CB_Rate_after_{m}M'] / 100 for m in range(1, 7)])
+    
+    # Compute log DFs assuming continuous compounding
+    log_df = -cb_rates * times
+    interp_func = interp1d(times, log_df, kind='cubic', fill_value="extrapolate")
+    
+    for m in range(1, 7):
+        t1 = tenor_map_cb[f'{m}M']
+        t2 = t1 + 1/365  # One day later
+        log_df1 = interp_func(t1)
+        log_df2 = interp_func(t2)
+        df1 = np.exp(log_df1)
+        df2 = np.exp(log_df2)
+        fwd_rate = (df1 / df2 - 1) * 365
+        result[f'CB_Implied_OIS_{m}M'] = fwd_rate * 100
+    return pd.Series(result)
+
+# Apply to your DataFrame
+cb_implied_ois = df.apply(compute_cb_implied_ois_curve, axis=1)
+df.update(cb_implied_ois)
+
+
+
+
+
 def plot_market_window(df, target_date, days_before=60, days_after=0):
     """
     Plot OIS Fwd vs CB Rate around a target date.
