@@ -2,33 +2,40 @@ from scipy.interpolate import interp1d
 import numpy as np
 import pandas as pd
 
-# Map months to year fraction
-tenor_map_cb = {f'{i}M': i / 12 for i in range(1, 7)}
-cb_forward_cols = [f'CB_Rate_after_{i}M' for i in range(1, 7)]
+tenor_map_cb = {f'{i}M': i * 30 for i in range(1, 7)}  # days approx
+cb_cols = [f'CB_Rate_after_{i}M' for i in range(1, 7)]
 
-def compute_cb_implied_ois_curve(row):
+def compute_cb_implied_ois_curve_on_basis(row):
     result = {}
-    times = np.array([tenor_map_cb[t] for t in tenor_map_cb])
-    cb_rates = np.array([row[f'CB_Rate_after_{m}M'] / 100 for m in range(1, 7)])
     
-    # Compute log DFs assuming continuous compounding
-    log_df = -cb_rates * times
-    interp_func = interp1d(times, log_df, kind='cubic', fill_value="extrapolate")
-    
+    # Step 1: build the interpolation function on CB Rate
+    tenors_days = np.array([tenor_map_cb[f'{i}M'] for i in range(1, 7)])
+    cb_rates = np.array([row[col] / 100 for col in cb_cols])  # Convert to decimal
+
+    cb_interp_func = interp1d(tenors_days, cb_rates, kind='cubic', fill_value='extrapolate')
+
+    # Step 2: loop over each target tenor
     for m in range(1, 7):
-        t1 = tenor_map_cb[f'{m}M']
-        t2 = t1 + 1/365  # One day later
-        log_df1 = interp_func(t1)
-        log_df2 = interp_func(t2)
-        df1 = np.exp(log_df1)
-        df2 = np.exp(log_df2)
-        fwd_rate = (df1 / df2 - 1) * 365
-        result[f'CB_Implied_OIS_{m}M'] = fwd_rate * 100
+        horizon = tenor_map_cb[f'{m}M']
+        df_val = 1.0
+        
+        # Step 3: Compound daily using interpolated CB rate
+        for day in range(1, horizon + 1):
+            r_daily = cb_interp_func(day)
+            df_val *= 1 / (1 + r_daily * (1 / 360))  # daily compounding
+
+        # Step 4: Get DF(t), DF(t+1), and compute implied 1-day fwd rate
+        df_t = df_val
+        r_daily_next = cb_interp_func(horizon + 1)
+        df_t1 = df_t * (1 / (1 + r_daily_next * (1 / 360)))
+
+        fwd_on = (df_t / df_t1 - 1) * 360
+        result[f'CB_Implied_OIS_{m}M'] = fwd_on * 100
+
     return pd.Series(result)
 
-# Apply to your DataFrame
-cb_implied_ois = df.apply(compute_cb_implied_ois_curve, axis=1)
-df.update(cb_implied_ois)
+# Apply on your DataFrame
+cb_implied_ois_on = df.apply(compute_cb_implied_ois_curve_on_basis, axis=1)
 
 
 
