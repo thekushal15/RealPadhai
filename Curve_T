@@ -1,0 +1,89 @@
+for m in range(1, 7):
+    df[f'Spread_{m}M'] = df[f'Fwd_OIS_after_{m}M'] - df[f'CB_Zero_Spot_{m}M']
+
+
+spread_stats = {}
+
+for m in range(1, 7):
+    spread_col = f'Spread_{m}M'
+    stats = df[spread_col].describe()
+    stats['median'] = df[spread_col].median()
+    stats['std_dev'] = df[spread_col].std()
+    stats['skew'] = df[spread_col].skew()
+    stats['kurtosis'] = df[spread_col].kurt()
+    spread_stats[spread_col] = stats
+
+# Convert to DataFrame for display
+spread_stats_df = pd.DataFrame(spread_stats)
+print(spread_stats_df.T)
+
+
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+sns.set(style="whitegrid")
+
+def plot_spread_grid(df, mpc_dates, target_date, days_before=200, days_after=200):
+    df['Dates'] = pd.to_datetime(df['Dates'])
+    target_date = pd.to_datetime(target_date)
+    start = target_date - pd.Timedelta(days=days_before)
+    end = target_date + pd.Timedelta(days=days_after)
+
+    df_sub = df[(df['Dates'] >= start) & (df['Dates'] <= end)].copy()
+    
+    fig, axs = plt.subplots(3, 2, figsize=(15, 10), sharex=True)
+    axs = axs.flatten()
+
+    for idx, m in enumerate(range(1, 7)):
+        col = f'Spread_{m}M'
+        ax = axs[idx]
+        sns.lineplot(data=df_sub, x='Dates', y=col, ax=ax)
+        ax.set_title(f'Spread {m}M: OIS - CB_Zero')
+        ax.axvline(target_date, color='black', linestyle='-', label='Target Date')
+
+        for mpc_date in mpc_dates:
+            if start <= mpc_date <= end:
+                ax.axvline(mpc_date, color='red', linestyle='--', alpha=0.6)
+
+        ax.legend()
+        ax.grid(True)
+
+    plt.tight_layout()
+    plt.show()
+
+
+
+plot_spread_grid(df, mpc_dates, target_date="2023-11-23")
+
+
+
+
+
+from datetime import timedelta
+
+def compute_spread_stats_window(df, target_date, days_before=200, days_after=200):
+    df['Dates'] = pd.to_datetime(df['Dates'])
+    target_date = pd.to_datetime(target_date)
+    start = target_date - pd.Timedelta(days=days_before)
+    end = target_date + pd.Timedelta(days=days_after)
+
+    df_window = df[(df['Dates'] >= start) & (df['Dates'] <= end)].copy()
+
+    spread_stats = {}
+    for m in range(1, 7):
+        spread_col = f'Spread_{m}M'
+        series = df_window[spread_col].dropna()
+        stats = series.describe()
+        stats['median'] = series.median()
+        stats['std_dev'] = series.std()
+        stats['skew'] = series.skew()
+        stats['kurtosis'] = series.kurt()
+        spread_stats[spread_col] = stats
+
+    return pd.DataFrame(spread_stats).T
+
+
+
+
+stats_around_date = compute_spread_stats_window(df, target_date="2023-11-23", days_before=200, days_after=200)
+print(stats_around_date)
