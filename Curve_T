@@ -1,3 +1,58 @@
+def plot_z_score_matrix(df, results, target_date, days_before=200, days_after=200, mpc_dates=None):
+    target_date = pd.to_datetime(target_date)
+    df_window = df[(df['Dates'] >= target_date - pd.Timedelta(days=days_before)) &
+                   (df['Dates'] <= target_date + pd.Timedelta(days=days_after))]
+
+    all_pairs = list(results.keys())
+    short_tenors = sorted(set([p[0] for p in all_pairs]), key=lambda x: int(x.replace('Y', '')))
+    long_tenors = sorted(set([p[1] for p in all_pairs]), key=lambda x: int(x.replace('Y', '')))
+
+    fig, axes = plt.subplots(len(short_tenors), len(long_tenors), figsize=(len(long_tenors)*3, len(short_tenors)*2.5), sharex=True, sharey=True)
+    
+    for i, short in enumerate(short_tenors):
+        for j, long in enumerate(long_tenors):
+            ax = axes[i, j]
+
+            if (short, long) in results:
+                z = results[(short, long)].loc[df_window.index]
+                ax.plot(df_window['Dates'], z, label=f"{short}-{long}", color='darkblue', linewidth=1)
+                ax.axhline(0, color='black', linestyle='--', linewidth=0.8)
+                ax.axhline(1, color='green', linestyle='--', linewidth=0.8)
+                ax.axhline(-1, color='red', linestyle='--', linewidth=0.8)
+                
+                # MPC vertical lines
+                if mpc_dates is not None:
+                    for d in mpc_dates:
+                        if df_window['Dates'].min() <= d <= df_window['Dates'].max():
+                            ax.axvline(pd.to_datetime(d), color='purple', linestyle=':', linewidth=1)
+
+            else:
+                ax.axis('off')  # hide invalid combinations
+
+            if i == len(short_tenors) - 1:
+                ax.set_xlabel(long)
+            if j == 0:
+                ax.set_ylabel(short)
+
+    plt.suptitle(f"Z-Score Spreads Around {target_date.strftime('%Y-%m-%d')}", fontsize=16)
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    plt.xticks(rotation=45)
+    plt.show()
+
+
+
+
+plot_z_score_matrix(df, results=results, target_date="2023-09-23", days_before=200, days_after=200, mpc_dates=mpc_dates)
+
+
+
+
+
+
+
+
+
+
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
