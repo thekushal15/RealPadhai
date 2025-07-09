@@ -1,3 +1,33 @@
+def clean_data(df):
+    # Define columns to check for empty or zero values
+    price_cols = [f'{t}_Px' for t in tenors if f'{t}_Px' in df.columns]
+    dv01_cols = [f'{t}_Dv01' for t in tenors if f'{t}_Dv01' in df.columns]
+    yield_cols = [f'{t}_Yld' for t in tenors if f'{t}_Yld' in df.columns]
+    check_cols = ['DateTime'] + price_cols + dv01_cols + yield_cols
+    
+    # Remove rows where any checked column is NaN or 0
+    df_clean = df.dropna(subset=check_cols)
+    df_clean = df_clean[(df_clean[check_cols] != 0).all(axis=1)]
+    
+    return df_clean
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import pandas as pd
 import itertools
 import numpy as np
