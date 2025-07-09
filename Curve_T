@@ -25,7 +25,7 @@ def apply_trading_strategy(df, tenors, pairs):
     
     position_state = {f"{pair[0]}_{pair[1]}": False for pair in pairs}
     entry_price = {}
-    scale_factor = {}
+    pair_positions = {}  # Track pair-specific positions
     running_pnl = {f"{pair[0]}_{pair[1]}": 0.0 for pair in pairs}
     
     for i in range(len(df)):
@@ -41,45 +41,48 @@ def apply_trading_strategy(df, tenors, pairs):
                     # Short short_tenor, long long_tenor
                     scale = row[f'{long_tenor}_Dv01'] / row[f'{short_tenor}_Dv01']
                     notional = 1_000_000 / (row[f'{long_tenor}_Dv01'] + scale * row[f'{short_tenor}_Dv01'])
-                    df.iloc[i, df.columns.get_loc(f'Pos_{short_tenor}')] += -notional * scale
-                    df.iloc[i, df.columns.get_loc(f'Pos_{long_tenor}')] += notional
+                    pos_short = -notional * scale
+                    pos_long = notional
+                    df.iloc[i, df.columns.get_loc(f'Pos_{short_tenor}')] += pos_short
+                    df.iloc[i, df.columns.get_loc(f'Pos_{long_tenor}')] += pos_long
                     df.iloc[i, df.columns.get_loc('Borrowed')] += 1_000_000
                     entry_price[pair_key] = (row[f'{short_tenor}_Px'], row[f'{long_tenor}_Px'])
-                    scale_factor[pair_key] = scale
+                    pair_positions[pair_key] = (pos_short, pos_long)
                     position_state[pair_key] = True
                     running_pnl[pair_key] = 0.0
                 elif z <= -2:  # Spread too narrow, expect it to widen
                     # Long short_tenor, short long_tenor
                     scale = row[f'{long_tenor}_Dv01'] / row[f'{short_tenor}_Dv01']
                     notional = 1_000_000 / (row[f'{long_tenor}_Dv01'] + scale * row[f'{short_tenor}_Dv01'])
-                    df.iloc[i, df.columns.get_loc(f'Pos_{short_tenor}')] += notional * scale
-                    df.iloc[i, df.columns.get_loc(f'Pos_{long_tenor}')] += -notional
+                    pos_short = notional * scale
+                    pos_long = -notional
+                    df.iloc[i, df.columns.get_loc(f'Pos_{short_tenor}')] += pos_short
+                    df.iloc[i, df.columns.get_loc(f'Pos_{long_tenor}')] += pos_long
                     df.iloc[i, df.columns.get_loc('Borrowed')] += 1_000_000
                     entry_price[pair_key] = (row[f'{short_tenor}_Px'], row[f'{long_tenor}_Px'])
-                    scale_factor[pair_key] = scale
+                    pair_positions[pair_key] = (pos_short, pos_long)
                     position_state[pair_key] = True
                     running_pnl[pair_key] = 0.0
             else:
                 if i > 0:
                     current_price = (row[f'{short_tenor}_Px'], row[f'{long_tenor}_Px'])
-                    prev_pos_short = df.iloc[i - 1][f'Pos_{short_tenor}']
-                    prev_pos_long = df.iloc[i - 1][f'Pos_{long_tenor}']
-                    unrealized_pnl = (current_price[0] - entry_price[pair_key][0]) * prev_pos_short + \
-                                     (current_price[1] - entry_price[pair_key][1]) * prev_pos_long
-                    running_pnl[pair_key] = unrealized_pnl  # Update running PnL
+                    pos_short, pos_long = pair_positions[pair_key]
+                    unrealized_pnl = (current_price[0] - entry_price[pair_key][0]) * pos_short + \
+                                     (current_price[1] - entry_price[pair_key][1]) * pos_long
+                    running_pnl[pair_key] = unrealized_pnl
                 
                 if abs(z) <= 0.75 or running_pnl[pair_key] <= -1_000:
                     exit_price = (row[f'{short_tenor}_Px'], row[f'{long_tenor}_Px'])
-                    prev_pos_short = df.iloc[i - 1][f'Pos_{short_tenor}']
-                    prev_pos_long = df.iloc[i - 1][f'Pos_{long_tenor}']
-                    pnl = (exit_price[0] - entry_price[pair_key][0]) * prev_pos_short + \
-                          (exit_price[1] - entry_price[pair_key][1]) * prev_pos_long
+                    pos_short, pos_long = pair_positions[pair_key]
+                    pnl = (exit_price[0] - entry_price[pair_key][0]) * pos_short + \
+                          (exit_price[1] - entry_price[pair_key][1]) * pos_long
                     df.iloc[i, df.columns.get_loc(f'PnL_{pair_key}')] = pnl
-                    # Reset positions for this pair
-                    df.iloc[i, df.columns.get_loc(f'Pos_{short_tenor}')] = 0.0
-                    df.iloc[i, df.columns.get_loc(f'Pos_{long_tenor}')] = 0.0
+                    # Subtract this pair's positions
+                    df.iloc[i, df.columns.get_loc(f'Pos_{short_tenor}')] -= pos_short
+                    df.iloc[i, df.columns.get_loc(f'Pos_{long_tenor}')] -= pos_long
                     position_state[pair_key] = False
                     running_pnl[pair_key] = 0.0
+                    pair_positions.pop(pair_key, None)
         
         total_pnl = sum(df.iloc[i][f'PnL_{pair[0]}_{pair[1]}'] for pair in pairs)
         df.iloc[i, df.columns.get_loc('Total_PnL')] = total_pnl
