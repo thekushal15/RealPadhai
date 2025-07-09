@@ -25,33 +25,44 @@ for pair in pairs:
     z_score = calculate_z_score(spread)
     results[pair] = z_score
 
-# Function to plot Z-scores around a target date
-def plot_z_score_grid(df, target_date, days_before=200, days_after=200, mpc_dates=None):
+import math
+import matplotlib.pyplot as plt
+import pandas as pd
+
+def plot_z_score_grid(df, results, target_date, days_before=200, days_after=200, mpc_dates=None):
     target_date = pd.to_datetime(target_date)
-    df_window = df[(df['Dates'] >= target_date - pd.Timedelta(days=days_before)) & 
+
+    # Slice data
+    df_window = df[(df['Dates'] >= target_date - pd.Timedelta(days=days_before)) &
                    (df['Dates'] <= target_date + pd.Timedelta(days=days_after))]
 
-    # Set up grid (3x2 for 6 pairs as an example, adjust as needed)
-    fig, axes = plt.subplots(3, 2, figsize=(16, 12), sharex=True)
-    axes = axes.flatten()
-    pair_idx = 0
+    zscore_keys = list(results.keys())
+    n_pairs = len(zscore_keys)
 
-    for pair in list(results.keys())[:6]:  # Limit to 6 pairs for 3x2 grid
+    # Define layout
+    n_cols = 6
+    n_rows = math.ceil(n_pairs / n_cols)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols * 4, n_rows * 3), sharex=True)
+    axes = axes.flatten()
+
+    for pair_idx, pair in enumerate(zscore_keys):
         z_score = results[pair].loc[df_window.index]
-        axes[pair_idx].plot(df_window['Dates'], z_score, label=f"{pair[0]}-{pair[1]}", color='darkblue')
+        axes[pair_idx].plot(df_window['Dates'], z_score, label=f"{pair[0]}–{pair[1]}", color='darkblue')
         axes[pair_idx].axhline(0, color='black', linestyle='--', linewidth=1)
         axes[pair_idx].axhline(1, color='green', linestyle='--', linewidth=1, label='+1 std')
         axes[pair_idx].axhline(-1, color='red', linestyle='--', linewidth=1, label='-1 std')
-        axes[pair_idx].set_title(f"Z-Score: {pair[0]}-{pair[1]}")
-        axes[pair_idx].legend()
-        
-        # Plot MPC dates
-        for d in mpc_dates:
-            if df_window['Dates'].min() <= d <= df_window['Dates'].max():
-            axes[pair_idx].axvline(d, color='purple', linestyle=':', linewidth=1)
+        axes[pair_idx].set_title(f"{pair[0]}–{pair[1]}")
+        axes[pair_idx].legend(fontsize=8)
 
-        
-        pair_idx += 1
+        # MPC Dates
+        if mpc_dates is not None and len(mpc_dates) > 0:
+            for d in mpc_dates:
+                if df_window['Dates'].min() <= d <= df_window['Dates'].max():
+                    axes[pair_idx].axvline(pd.to_datetime(d), color='purple', linestyle=':', linewidth=1)
+
+    # Hide unused axes
+    for ax in axes[n_pairs:]:
+        ax.axis('off')
 
     plt.tight_layout()
     plt.xticks(rotation=45)
