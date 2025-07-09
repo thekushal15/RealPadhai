@@ -1,3 +1,90 @@
+# Step 1: compute window-based stats dynamically
+window_stats_df = compute_spread_stats_window(df, target_date="2023-11-23", days_before=200, days_after=200)
+
+# Step 2: Convert to dict for easy access
+spread_stats = {
+    tenor.replace("Spread_", "").replace("M", ""): {
+        "median": window_stats_df.loc[tenor, 'median'],
+        "std": window_stats_df.loc[tenor, 'std_dev']
+    }
+    for tenor in window_stats_df.index
+}
+
+
+# Step 3: Calculate pricing score columns
+for m in range(1, 7):
+    cb_col = f'CB_Zero_Spot_{m}M'
+    ois_col = f'{m}M'
+    spread_info = spread_stats[str(m)]
+    
+    fair_val = df[cb_col] + spread_info['median']
+    score = (df[ois_col] - fair_val) / spread_info['std']
+    df[f'Pricing_Score_{m}M'] = score
+
+
+# -------------------------------------
+# STEP 3: Plot Pricing Score Grid
+# -------------------------------------
+def plot_pricing_score_grid(df, target_date, days_before=200, days_after=200):
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    # Filter
+    df['Dates'] = pd.to_datetime(df['Dates'])
+    target_date = pd.to_datetime(target_date)
+    df_window = df[(df['Dates'] >= target_date - pd.Timedelta(days=days_before)) & 
+                   (df['Dates'] <= target_date + pd.Timedelta(days=days_after))]
+
+    # Set up grid
+    fig, axes = plt.subplots(3, 2, figsize=(16, 12), sharex=True)
+    axes = axes.flatten()
+
+    for idx, m in enumerate(range(1, 7)):
+        col = f'Pricing_Score_{m}M'
+        sns.lineplot(x='Dates', y=col, data=df_window, ax=axes[idx], label=f'{m}M Score', color='darkblue')
+        axes[idx].axhline(0, color='black', linestyle='--', linewidth=1)
+        axes[idx].axhline(1, color='green', linestyle='--', linewidth=1, label='+1 std')
+        axes[idx].axhline(-1, color='red', linestyle='--', linewidth=1, label='-1 std')
+        axes[idx].set_title(f'Pricing Score: {m}M')
+        axes[idx].legend()
+
+        # Plot MPC dates
+        for d in mpc_dates:
+            if df_window['Dates'].min() <= d <= df_window['Dates'].max():
+                axes[idx].axvline(d, color='purple', linestyle=':', linewidth=1)
+
+    plt.tight_layout()
+    plt.show()
+
+
+plot_pricing_score_grid(df, target_date="2023-11-23", days_before=200, days_after=200)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 for m in range(1, 7):
     df[f'Spread_{m}M'] = df[f'Fwd_OIS_after_{m}M'] - df[f'CB_Zero_Spot_{m}M']
 
