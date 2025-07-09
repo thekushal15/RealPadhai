@@ -68,13 +68,13 @@ plot_pricing_score_grid(df, target_date="2023-11-23", days_before=200, days_afte
 
 
 
-
-
-
-
-
-
-
+for m in range(1, 7):
+    spread_col = f'Spread_{m}M'
+    z_col = f'Rolling_Z_{m}M'
+    MA_col = f'MA_{m}M'
+    df[z_col] = (df[spread_col] - df[spread_col].rolling(window=60).mean()) / \
+                df[spread_col].rolling(window=60).std()
+    df[MA_col] = df[spread_col].rolling(window=60).mean()
 
 
 
@@ -124,7 +124,10 @@ def plot_spread_grid(df, mpc_dates, target_date, days_before=200, days_after=200
     for idx, m in enumerate(range(1, 7)):
         col = f'Spread_{m}M'
         ax = axs[idx]
+        z_col = f'Rolling_Z_{m}M'
         sns.lineplot(data=df_sub, x='Dates', y=col, ax=ax)
+        sns.lineplot(data=df_sub, x='Dates', y='Spread_3M', label='Spread_3M')
+        sns.lineplot(data=df_sub, x='Dates', y=z_col, label='60D MA')
         ax.set_title(f'Spread {m}M: OIS - CB_Zero')
         ax.axvline(target_date, color='black', linestyle='-', label='Target Date')
 
