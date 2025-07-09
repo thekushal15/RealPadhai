@@ -1,5 +1,159 @@
 import pandas as pd
 import itertools
+import numpy as np
+
+# List of bond tenors based on provided columns
+tenors = ['26', '30', '31', '32', '35', '36', '37', '40', '41']
+
+# Generate all possible pairs
+pairs = list(itertools.combinations(tenors, 2))
+
+# Initialize columns
+def initialize_columns(df, tenors, pairs):
+    for tenor in tenors:
+        df[f'Pos_{tenor}'] = 0.0
+    df['Borrowed'] = 0.0
+    for pair in pairs:
+        pair_key = f"{pair[0]}_{pair[1]}"
+        df[f'PnL_{pair_key}'] = 0.0
+    df['Total_PnL'] = 0.0
+    df['Cumulative_PnL'] = 0.0
+    return df
+
+# Trading strategy logic
+def apply_trading_strategy(df, tenors, pairs, pair_stop_loss=-1_000, daily_stop_loss=-10_000):
+    df = initialize_columns(df, tenors, pairs)
+    
+    position_state = {f"{pair[0]}_{pair[1]}": False for pair in pairs}
+    entry_price = {}
+    pair_positions = {}
+    running_pnl = {f"{pair[0]}_{pair[1]}": 0.0 for pair in pairs}
+    prev_z = {f"{pair[0]}_{pair[1]}": None for pair in pairs}  # Track previous z-score
+    
+    for i in range(len(df)):
+        row = df.iloc[i]
+        daily_pnl = 0.0  # Track daily PnL for portfolio stop-loss
+        
+        for pair in pairs:
+            short_tenor, long_tenor = pair
+            pair_key = f"{short_tenor}_{long_tenor}"
+            z = row[(f'{short_tenor}_Yld', f'{long_tenor}_Yld')]
+            
+            # Check for large z-score change to avoid volatile entries
+            if i > 0 and prev_z[pair_key] is not None:
+                z_change = abs(z - prev_z[pair_key])
+                if z_change > 3:  # Skip entry if z-score jumps too much
+                    prev_z[pair_key] = z
+                    continue
+            
+            if not position_state[pair_key]:
+                if z >= 2:  # Spread too wide, expect it to narrow
+                    scale = row[f'{long_tenor}_Dv01'] / row[f'{short_tenor}_Dv01']
+                    notional = 1_000_000 / (row[f'{long_tenor}_Dv01'] + scale * row[f'{short_tenor}_Dv01'])
+                    pos_short = -notional * scale
+                    pos_long = notional
+                    df.iloc[i, df.columns.get_loc(f'Pos_{short_tenor}')] += pos_short
+                    df.iloc[i, df.columns.get_loc(f'Pos_{long_tenor}')] += pos_long
+                    df.iloc[i, df.columns.get_loc('Borrowed')] += 1_000_000
+                    entry_price[pair_key] = (row[f'{short_tenor}_Px'], row[f'{long_tenor}_Px'])
+                    pair_positions[pair_key] = (pos_short, pos_long)
+                    position_state[pair_key] = True
+                    running_pnl[pair_key] = 0.0
+                elif z <= -2:  # Spread too narrow, expect it to widen
+                    scale = row[f'{long_tenor}_Dv01'] / row[f'{short_tenor}_Dv01']
+                    notional = 1_000_000 / (row[f'{long_tenor}_Dv01'] + scale * row[f'{short_tenor}_Dv01'])
+                    pos_short = notional * scale
+                    pos_long = -notional
+                    df.iloc[i, df.columns.get_loc(f'Pos_{short_tenor}')] += pos_short
+                    df.iloc[i, df.columns.get_loc(f'Pos_{long_tenor}')] += pos_long
+                    df.iloc[i, df.columns.get_loc('Borrowed')] += 1_000_000
+                    entry_price[pair_key] = (row[f'{short_tenor}_Px'], row[f'{long_tenor}_Px'])
+                    pair_positions[pair_key] = (pos_short, pos_long)
+                    position_state[pair_key] = True
+                    running_pnl[pair_key] = 0.0
+            else:
+                if i > 0:
+                    current_price = (row[f'{short_tenor}_Px'], row[f'{long_tenor}_Px'])
+                    pos_short, pos_long = pair_positions[pair_key]
+                    unrealized_pnl = (current_price[0] - entry_price[pair_key][0]) * pos_short + \
+                                     (current_price[1] - entry_price[pair_key][1]) * pos_long
+                    
+                    # Cap loss at pair_stop_loss
+                    if unrealized_pnl <= pair_stop_loss:
+                        # Assume exit at price causing exactly pair_stop_loss
+                        pnl = pair_stop_loss
+                    else:
+                        pnl = unrealized_pnl
+                    running_pnl[pair_key] = pnl
+                
+                if abs(z) <= 0.75 or running_pnl[pair_key] <= pair_stop_loss:
+                    exit_price = (row[f'{short_tenor}_Px'], row[f'{long_tenor}_Px'])
+                    pos_short, pos_long = pair_positions[pair_key]
+                    if running_pnl[pair_key] <= pair_stop_loss:
+                        pnl = pair_stop_loss  # Enforce stop-loss cap
+                    else:
+                        pnl = (exit_price[0] - entry_price[pair_key][0]) * pos_short + \
+                              (exit_price[1] - entry_price[pair_key][1]) * pos_long
+                    df.iloc[i, df.columns.get_loc(f'PnL_{pair_key}')] = pnl
+                    df.iloc[i, df.columns.get_loc(f'Pos_{short_tenor}')] -= pos_short
+                    df.iloc[i, df.columns.get_loc(f'Pos_{long_tenor}')] -= pos_long
+                    position_state[pair_key] = False
+                    running_pnl[pair_key] = 0.0
+                    pair_positions.pop(pair_key, None)
+            
+            daily_pnl += df.iloc[i][f'PnL_{pair_key}']
+            prev_z[pair_key] = z
+        
+        # Portfolio-level stop-loss
+        if daily_pnl <= daily_stop_loss:
+            # Close all open positions
+            for pair in pairs:
+                pair_key = f"{pair[0]}_{pair[1]}"
+                if position_state[pair_key]:
+                    short_tenor, long_tenor = pair
+                    pos_short, pos_long = pair_positions[pair_key]
+                    df.iloc[i, df.columns.get_loc(f'Pos_{short_tenor}')] -= pos_short
+                    df.iloc[i, df.columns.get_loc(f'Pos_{long_tenor}')] -= pos_long
+                    position_state[pair_key] = False
+                    running_pnl[pair_key] = 0.0
+                    pair_positions.pop(pair_key, None)
+        
+        df.iloc[i, df.columns.get_loc('Total_PnL')] = daily_pnl
+        df.iloc[i, df.columns.get_loc('Cumulative_PnL')] = daily_pnl if i == 0 else df.iloc[i - 1]['Cumulative_PnL'] + daily_pnl
+    
+    output_columns = [f'Pos_{tenor}' for tenor in tenors] + \
+                     ['Borrowed'] + \
+                     [f'PnL_{pair[0]}_{pair[1]}' for pair in pairs] + \
+                     ['Total_PnL', 'Cumulative_PnL']
+    
+    return df[output_columns]
+
+# Example usage
+# df = pd.read_csv('your_data.csv')
+# result = apply_trading_strategy(df, tenors, pairs, pair_stop_loss=-1_000, daily_stop_loss=-10_000)
+# print(result)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+import pandas as pd
+import itertools
 
 # List of bond tenors based on provided columns
 tenors = ['26', '30', '31', '32', '35', '36', '37', '40', '41']
