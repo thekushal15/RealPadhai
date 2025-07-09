@@ -1,3 +1,87 @@
+# Initialize columns
+df['Pos_26'] = 0.0
+df['Pos_30'] = 0.0
+df['Pos_35'] = 0.0
+df['Borrowed'] = 0.0
+df['PnL_26_30'] = 0.0
+df['PnL_30_35'] = 0.0
+
+# Strategy Logic
+position_state = {'26_30': False, '30_35': False}
+entry_price = {}
+entry_dv01 = {}
+scale_factor = {}
+
+for i in range(len(df)):
+    row = df.iloc[i]
+
+    ### --- Spread 26Y-30Y ---
+    z = row[('26_Yld', '30_Yld')]
+    if not position_state['26_30']:
+        if z > 2:
+            scale = row['30_DV01'] / row['26_DV01']
+            notional = 1_000_000 / (row['30_DV01'] + scale * row['26_DV01'])
+            df.iloc[i, df.columns.get_loc('Pos_26')] = notional * scale
+            df.iloc[i, df.columns.get_loc('Pos_30')] = -notional
+            df.iloc[i, df.columns.get_loc('Borrowed')] = 1_000_000
+            entry_price['26_30'] = (row['26_PX'], row['30_PX'])
+            position_state['26_30'] = True
+        elif z < -2:
+            scale = row['30_DV01'] / row['26_DV01']
+            notional = 1_000_000 / (row['30_DV01'] + scale * row['26_DV01'])
+            df.iloc[i, df.columns.get_loc('Pos_26')] = -notional * scale
+            df.iloc[i, df.columns.get_loc('Pos_30')] = notional
+            df.iloc[i, df.columns.get_loc('Borrowed')] = 1_000_000
+            entry_price['26_30'] = (row['26_PX'], row['30_PX'])
+            position_state['26_30'] = True
+    else:
+        if abs(z) <= 0.75:
+            exit_price = (row['26_PX'], row['30_PX'])
+            pnl = (exit_price[0] - entry_price['26_30'][0]) * df.iloc[i - 1]['Pos_26'] + \
+                  (exit_price[1] - entry_price['26_30'][1]) * df.iloc[i - 1]['Pos_30']
+            df.iloc[i, df.columns.get_loc('PnL_26_30')] = pnl
+            position_state['26_30'] = False
+
+    ### --- Spread 30Y-35Y ---
+    z = row[('30_Yld', '35_Yld')]
+    if not position_state['30_35']:
+        if z > 2:
+            scale = row['35_DV01'] / row['30_DV01']
+            notional = 1_000_000 / (row['35_DV01'] + scale * row['30_DV01'])
+            df.iloc[i, df.columns.get_loc('Pos_30')] += notional * scale
+            df.iloc[i, df.columns.get_loc('Pos_35')] = -notional
+            df.iloc[i, df.columns.get_loc('Borrowed')] += 1_000_000
+            entry_price['30_35'] = (row['30_PX'], row['35_PX'])
+            position_state['30_35'] = True
+        elif z < -2:
+            scale = row['35_DV01'] / row['30_DV01']
+            notional = 1_000_000 / (row['35_DV01'] + scale * row['30_DV01'])
+            df.iloc[i, df.columns.get_loc('Pos_30')] += -notional * scale
+            df.iloc[i, df.columns.get_loc('Pos_35')] = notional
+            df.iloc[i, df.columns.get_loc('Borrowed')] += 1_000_000
+            entry_price['30_35'] = (row['30_PX'], row['35_PX'])
+            position_state['30_35'] = True
+    else:
+        if abs(z) <= 0.75:
+            exit_price = (row['30_PX'], row['35_PX'])
+            prev_pos30 = df.iloc[i - 1]['Pos_30'] - df.iloc[i - 1]['Pos_26']
+            pnl = (exit_price[0] - entry_price['30_35'][0]) * prev_pos30 + \
+                  (exit_price[1] - entry_price['30_35'][1]) * df.iloc[i - 1]['Pos_35']
+            df.iloc[i, df.columns.get_loc('PnL_30_35')] = pnl
+            position_state['30_35'] = False
+
+# Total PnL
+df['Total_PnL'] = df['PnL_26_30'] + df['PnL_30_35']
+df[['Pos_26', 'Pos_30', 'Pos_35', 'Borrowed', 'PnL_26_30', 'PnL_30_35', 'Total_PnL']]
+
+
+
+
+
+
+
+
+
 def plot_z_score_matrix(df, results, target_date, days_before=200, days_after=200, mpc_dates=None):
     target_date = pd.to_datetime(target_date)
     df_window = df[(df['Dates'] >= target_date - pd.Timedelta(days=days_before)) &
