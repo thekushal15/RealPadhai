@@ -1,3 +1,119 @@
+import pandas as pd
+import itertools
+
+# List of bond tenors based on provided columns
+tenors = ['26', '30', '31', '32', '35', '36', '37', '40', '41']
+
+# Generate all possible pairs
+pairs = list(itertools.combinations(tenors, 2))
+
+# Initialize columns
+def initialize_columns(df, tenors, pairs):
+    # Position columns for each bond
+    for tenor in tenors:
+        df[f'Pos_{tenor}'] = 0.0
+    
+    # Borrowed amount column
+    df['Borrowed'] = 0.0
+    
+    # PnL columns for each pair
+    for pair in pairs:
+        pair_key = f"{pair[0]}_{pair[1]}"
+        df[f'PnL_{pair_key}'] = 0.0
+    
+    # Total and Cumulative PnL
+    df['Total_PnL'] = 0.0
+    df['Cumulative_PnL'] = 0.0
+    
+    return df
+
+# Trading strategy logic
+def apply_trading_strategy(df, tenors, pairs):
+    df = initialize_columns(df, tenors, pairs)
+    
+    # Initialize position state and entry data for each pair
+    position_state = {f"{pair[0]}_{pair[1]}": False for pair in pairs}
+    entry_price = {}
+    scale_factor = {}
+    
+    for i in range(len(df)):
+        row = df.iloc[i]
+        
+        # Process each pair
+        for pair in pairs:
+            short_tenor, long_tenor = pair
+            pair_key = f"{short_tenor}_{long_tenor}"
+            
+            # Calculate z-score for the pair
+            z = row[(f'{short_tenor}_Yld', f'{long_tenor}_Yld')]
+            
+            if not position_state[pair_key]:
+                # Entry logic
+                if z > 2:
+                    # Long short_tenor, short long_tenor
+                    scale = row[f'{long_tenor}_Dv01'] / row[f'{short_tenor}_Dv01']
+                    notional = 1_000_000 / (row[f'{long_tenor}_Dv01'] + scale * row[f'{short_tenor}_Dv01'])
+                    df.iloc[i, df.columns.get_loc(f'Pos_{short_tenor}')] += notional * scale
+                    df.iloc[i, df.columns.get_loc(f'Pos_{long_tenor}')] += -notional
+                    df.iloc[i, df.columns.get_loc('Borrowed')] += 1_000_000
+                    entry_price[pair_key] = (row[f'{short_tenor}_Px'], row[f'{long_tenor}_Px'])
+                    scale_factor[pair_key] = scale
+                    position_state[pair_key] = True
+                elif z < -2:
+                    # Short short_tenor, long long_tenor
+                    scale = row[f'{long_tenor}_Dv01'] / row[f'{short_tenor}_Dv01']
+                    notional = 1_000_000 / (row[f'{long_tenor}_Dv01'] + scale * row[f'{short_tenor}_Dv01'])
+                    df.iloc[i, df.columns.get_loc(f'Pos_{short_tenor}')] += -notional * scale
+                    df.iloc[i, df.columns.get_loc(f'Pos_{long_tenor}')] += notional
+                    df.iloc[i, df.columns.get_loc('Borrowed')] += 1_000_000
+                    entry_price[pair_key] = (row[f'{short_tenor}_Px'], row[f'{long_tenor}_Px'])
+                    scale_factor[pair_key] = scale
+                    position_state[pair_key] = True
+            else:
+                # Exit logic
+                if abs(z) <= 0.75:
+                    exit_price = (row[f'{short_tenor}_Px'], row[f'{long_tenor}_Px'])
+                    # Calculate PnL
+                    prev_pos_short = df.iloc[i - 1][f'Pos_{short_tenor}']
+                    prev_pos_long = df.iloc[i - 1][f'Pos_{long_tenor}']
+                    pnl = (exit_price[0] - entry_price[pair_key][0]) * prev_pos_short + \
+                          (exit_price[1] - entry_price[pair_key][1]) * prev_pos_long
+                    df.iloc[i, df.columns.get_loc(f'PnL_{pair_key}')] = pnl
+                    position_state[pair_key] = False
+        
+        # Calculate Total PnL for the row
+        total_pnl = sum(df.iloc[i][f'PnL_{pair[0]}_{pair[1]}'] for pair in pairs)
+        df.iloc[i, df.columns.get_loc('Total_PnL')] = total_pnl
+        
+        # Calculate Cumulative PnL
+        if i == 0:
+            df.iloc[i, df.columns.get_loc('Cumulative_PnL')] = total_pnl
+        else:
+            df.iloc[i, df.columns.get_loc('Cumulative_PnL')] = df.iloc[i - 1]['Cumulative_PnL'] + total_pnl
+    
+    # Select relevant columns for output
+    output_columns = [f'Pos_{tenor}' for tenor in tenors] + \
+                     ['Borrowed'] + \
+                     [f'PnL_{pair[0]}_{pair[1]}' for pair in pairs] + \
+                     ['Total_PnL', 'Cumulative_PnL']
+    
+    return df[output_columns]
+
+# Example usage
+# df = pd.read_csv('your_data.csv')  # Load your data
+# result = apply_trading_strategy(df, tenors, pairs)
+# print(result)
+
+
+
+
+
+
+
+
+
+
+
 # Initialize columns
 df['Pos_26'] = 0.0
 df['Pos_30'] = 0.0
