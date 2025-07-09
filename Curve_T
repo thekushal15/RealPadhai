@@ -46,10 +46,10 @@ def plot_z_score_grid(df, target_date, days_before=200, days_after=200, mpc_date
         axes[pair_idx].legend()
         
         # Plot MPC dates
-        if mpc_dates:
-            for d in mpc_dates:
-                if df_window['Dates'].min() <= pd.to_datetime(d) <= df_window['Dates'].max():
-                    axes[pair_idx].axvline(pd.to_datetime(d), color='purple', linestyle=':', linewidth=1)
+        for d in mpc_dates:
+            if df_window['Dates'].min() <= d <= df_window['Dates'].max():
+            axes[pair_idx].axvline(d, color='purple', linestyle=':', linewidth=1)
+
         
         pair_idx += 1
 
