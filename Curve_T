@@ -1,3 +1,160 @@
+import pandas as pd
+import itertools
+import numpy as np
+
+# Set tenors and pairs
+tenors = ['26', '30', '31', '32', '35', '36', '37', '40', '41']
+pairs = list(itertools.combinations(tenors, 2))
+
+def flatten_columns(df):
+    df.columns = [
+        f"{col[0]}_{col[1]}" if isinstance(col, tuple) else col
+        for col in df.columns
+    ]
+    return df
+
+def initialize_columns(df, tenors, pairs):
+    for tenor in tenors:
+        df[f'Pos_{tenor}'] = 0.0
+    df['Borrowed'] = 0.0
+    for pair in pairs:
+        df[f'PnL_{pair[0]}_{pair[1]}'] = 0.0
+    df['Total_PnL'] = 0.0
+    df['Cumulative_PnL'] = 0.0
+    return df
+
+def apply_trading_strategy(df, tenors, pairs, stop_loss_trigger=-1000, daily_stop_loss=-10000):
+    df = flatten_columns(df)
+    df = initialize_columns(df, tenors, pairs)
+
+    position_state = {f"{a}_{b}": False for a, b in pairs}
+    entry_price = {}
+    pair_positions = {}
+    running_pnl = {f"{a}_{b}": 0.0 for a, b in pairs}
+    prev_z = {f"{a}_{b}": None for a, b in pairs}
+
+    for i in range(len(df)):
+        try:
+            row = df.iloc[i]
+            daily_pnl = 0.0
+
+            for pair in pairs:
+                short, long = pair
+                pair_key = f"{short}_{long}"
+                z_col = f"{short}_Yld_{long}_Yld"
+
+                z = row[z_col]
+                if pd.isna(z):
+                    continue
+
+                if i > 0 and prev_z[pair_key] is not None:
+                    z_change = abs(z - prev_z[pair_key])
+                    if z_change > 3:
+                        prev_z[pair_key] = z
+                        continue
+
+                if not position_state[pair_key]:
+                    if z >= 3:
+                        scale = row[f'{long}_DV01'] / row[f'{short}_DV01']
+                        notional = 1_000_000 / (row[f'{long}_DV01'] + scale * row[f'{short}_DV01'])
+                        pos_short = -notional * scale
+                        pos_long = notional
+                        df.loc[i, f'Pos_{short}'] += pos_short
+                        df.loc[i, f'Pos_{long}'] += pos_long
+                        df.loc[i, 'Borrowed'] += 1_000_000
+                        entry_price[pair_key] = (row[f'{short}_PX'], row[f'{long}_PX'])
+                        pair_positions[pair_key] = (pos_short, pos_long)
+                        position_state[pair_key] = True
+                        running_pnl[pair_key] = 0.0
+
+                    elif z <= -3:
+                        scale = row[f'{long}_DV01'] / row[f'{short}_DV01']
+                        notional = 1_000_000 / (row[f'{long}_DV01'] + scale * row[f'{short}_DV01'])
+                        pos_short = notional * scale
+                        pos_long = -notional
+                        df.loc[i, f'Pos_{short}'] += pos_short
+                        df.loc[i, f'Pos_{long}'] += pos_long
+                        df.loc[i, 'Borrowed'] += 1_000_000
+                        entry_price[pair_key] = (row[f'{short}_PX'], row[f'{long}_PX'])
+                        pair_positions[pair_key] = (pos_short, pos_long)
+                        position_state[pair_key] = True
+                        running_pnl[pair_key] = 0.0
+
+                else:
+                    current_price = (row[f'{short}_PX'], row[f'{long}_PX'])
+                    pos_short, pos_long = pair_positions[pair_key]
+                    unrealized = (current_price[0] - entry_price[pair_key][0]) * pos_short + \
+                                 (current_price[1] - entry_price[pair_key][1]) * pos_long
+                    running_pnl[pair_key] = unrealized
+
+                    if abs(z) <= 1.5 or running_pnl[pair_key] <= stop_loss_trigger:
+                        pnl = (current_price[0] - entry_price[pair_key][0]) * pos_short + \
+                              (current_price[1] - entry_price[pair_key][1]) * pos_long
+                        df.loc[i, f'PnL_{pair_key}'] = pnl
+                        df.loc[i, f'Pos_{short}'] -= pos_short
+                        df.loc[i, f'Pos_{long}'] -= pos_long
+                        position_state[pair_key] = False
+                        running_pnl[pair_key] = 0.0
+                        pair_positions.pop(pair_key, None)
+
+                daily_pnl += df.loc[i, f'PnL_{pair_key}']
+                prev_z[pair_key] = z
+
+            if daily_pnl <= daily_stop_loss:
+                for pair in pairs:
+                    pair_key = f"{pair[0]}_{pair[1]}"
+                    if position_state[pair_key]:
+                        short, long = pair
+                        pos_short, pos_long = pair_positions[pair_key]
+                        df.loc[i, f'Pos_{short}'] -= pos_short
+                        df.loc[i, f'Pos_{long}'] -= pos_long
+                        position_state[pair_key] = False
+                        running_pnl[pair_key] = 0.0
+                        pair_positions.pop(pair_key, None)
+
+            df.loc[i, 'Total_PnL'] = daily_pnl
+            df.loc[i, 'Cumulative_PnL'] = daily_pnl if i == 0 else df.iloc[i - 1]['Cumulative_PnL'] + daily_pnl
+
+        except Exception as e:
+            print(f"Skipped index {i} due to error: {e}")
+            continue
+
+    output_cols = [f'Pos_{t}' for t in tenors] + ['Borrowed'] + [f'PnL_{a}_{b}' for a, b in pairs] + ['Total_PnL', 'Cumulative_PnL']
+    return df[output_cols]
+
+
+#df = pd.read_csv('your_intraday_data.csv', parse_dates=['DateTime'])
+result = apply_trading_strategy(df, tenors, pairs)
+result.to_csv("strategy_output.csv", index=False)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 def debug_single_index(df, tenors, pairs, index_to_test):
     print(f"\n--- DEBUGGING INDEX {index_to_test} ---")
     
