@@ -60,10 +60,10 @@ def apply_trading_strategy(df, tenors, pairs, use_max_cap=True, max_loss_cap=-10
         kalman_filters[pair_key] = KalmanFilter(
             transition_matrices=[1],
             observation_matrices=[1],
-            initial_state_mean=0,
-            initial_state_covariance=1,
+            initial_state_mean=np.array([0.0]),
+            initial_state_covariance=np.array([[1.0]]),
             observation_covariance=1,
-            transition_covariance=0.01  # Adjusted for stability
+            transition_covariance=0.01
         )
 
     for i in range(len(df)):
