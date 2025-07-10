@@ -12,6 +12,7 @@ def flatten_columns(df):
 
 # Initialize required columns
 def initialize_columns(df, tenors, pairs):
+    df['Idx'] = range(len(df))
     for tenor in tenors:
         df[f'Pos_{tenor}'] = 0.0
     df['Borrowed'] = 0.0
@@ -81,14 +82,11 @@ def apply_bps_strategy(df, tenors, pairs, bps_stop_loss=20):
                     current_price = (row[f'{short}_PX'], row[f'{long}_PX'])
                     pos_short, pos_long = pair_positions[pair_key]
                     entry_short_px, entry_long_px = entry_price[pair_key]
-                    
-                    # Calculate PnL in bps relative to position size
+
                     short_pnl = (current_price[0] - entry_short_px) / entry_short_px * 10_000 * (pos_short / abs(pos_short))
                     long_pnl = (current_price[1] - entry_long_px) / entry_long_px * 10_000 * (pos_long / abs(pos_long))
                     pnl_bps = short_pnl + long_pnl
                     df.loc[i, f'PnL_bps_{pair_key}'] = pnl_bps
-
-                    spread_change = abs((row[f'{long}_Yld'] - row[f'{short}_Yld']) - entry_spread[pair_key]) * 10_000
 
                     if abs(z) <= 1.5 or abs(pnl_bps) >= bps_stop_loss:
                         df.loc[i, f'Pos_{short}'] -= pos_short
@@ -109,5 +107,5 @@ def apply_bps_strategy(df, tenors, pairs, bps_stop_loss=20):
             print(f"Error at index {i}: {e}")
             continue
 
-    output_cols = [f'PnL_bps_{a}_{b}' for a, b in pairs] + [f'Pos_{t}' for t in tenors] + ['Borrowed', 'Total_bps', 'Cumulative_bps']
+    output_cols = ['Idx'] + [f'Pos_{t}' for t in tenors] + [f'PnL_bps_{a}_{b}' for a, b in pairs] + ['Borrowed', 'Total_bps', 'Cumulative_bps']
     return df[output_cols]
