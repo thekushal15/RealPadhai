@@ -42,6 +42,7 @@ def apply_trading_strategy(df, tenors, pairs, use_max_cap=True, max_loss_cap=-10
     pair_positions = {}
     running_pnl_bps = {f"{a}_{b}": 0.0 for a, b in pairs}
     prev_z = {f"{a}_{b}": None for a, b in pairs}
+    prev_state_means = {f"{a}_{b}": None for a, b in pairs}  # Initialize state means
     daily_trades = 0
     daily_stop_losses = 0
     daily_profitable_trades = 0
@@ -62,7 +63,7 @@ def apply_trading_strategy(df, tenors, pairs, use_max_cap=True, max_loss_cap=-10
             initial_state_mean=0,
             initial_state_covariance=1,
             observation_covariance=1,
-            transition_covariance=0.0001
+            transition_covariance=0.01  # Adjusted for stability
         )
 
     for i in range(len(df)):
@@ -85,14 +86,18 @@ def apply_trading_strategy(df, tenors, pairs, use_max_cap=True, max_loss_cap=-10
 
                 # Update Kalman filter with current spread
                 kf = kalman_filters[pair_key]
-                if i == 0:
-                    state_means, _ = kf.filter_update(filtered_state_mean=np.array([spread]))
+                if i == 0 or prev_state_means[pair_key] is None:
+                    state_means, state_covariances = kf.filter_update(
+                        filtered_state_mean=np.array([spread]),
+                        observation=np.array([spread])
+                    )
                 else:
-                    state_means, _ = kf.filter_update(filtered_state_mean=prev_state_means[pair_key], observation=spread)
+                    state_means, state_covariances = kf.filter_update(
+                        filtered_state_mean=prev_state_means[pair_key],
+                        observation=np.array([spread])
+                    )
                 filtered_mean = state_means[0]
-                # Approximate variance from state covariance (simplified)
-                _, state_covariances = kf.filter(spread.reshape(-1, 1))
-                filtered_std = np.sqrt(state_covariances[-1][0, 0]) if state_covariances.size else 1.0
+                filtered_std = np.sqrt(state_covariances[0][0]) if state_covariances.size else 1.0
 
                 # Calculate Kalman-based z-score
                 z_score = (spread - filtered_mean) / filtered_std if filtered_std > 0 else 0
