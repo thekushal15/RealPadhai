@@ -1,0 +1,113 @@
+import pandas as pd
+import itertools
+
+# Tenors and spread pairs
+tenors = ['26', '30', '31', '32', '35', '40']
+pairs = list(itertools.combinations(tenors, 2))
+
+# Flatten column names if needed
+def flatten_columns(df):
+    df.columns = [f"{col[0]}_{col[1]}" if isinstance(col, tuple) else col for col in df.columns]
+    return df
+
+# Initialize required columns
+def initialize_columns(df, tenors, pairs):
+    for tenor in tenors:
+        df[f'Pos_{tenor}'] = 0.0
+    df['Borrowed'] = 0.0
+    for pair in pairs:
+        df[f'PnL_bps_{pair[0]}_{pair[1]}'] = 0.0
+    df['Total_bps'] = 0.0
+    df['Cumulative_bps'] = 0.0
+    return df
+
+# Main strategy logic with bps-based PnL
+def apply_bps_strategy(df, tenors, pairs, bps_stop_loss=20):
+    df = flatten_columns(df)
+    df = initialize_columns(df, tenors, pairs)
+
+    position_state = {f"{a}_{b}": False for a, b in pairs}
+    entry_price = {}
+    pair_positions = {}
+    entry_spread = {}
+    prev_z = {f"{a}_{b}": None for a, b in pairs}
+
+    for i in range(len(df)):
+        try:
+            row = df.iloc[i]
+            daily_bps_pnl = 0.0
+
+            for pair in pairs:
+                short, long = pair
+                pair_key = f"{short}_{long}"
+                z_col = f"{short}_Yld_{long}_Yld"
+                z = row.get(z_col, None)
+                if pd.isna(z):
+                    continue
+
+                if i > 0 and prev_z[pair_key] is not None:
+                    if abs(z - prev_z[pair_key]) > 5:
+                        prev_z[pair_key] = z
+                        continue
+
+                if not position_state[pair_key]:
+                    if z >= 3:
+                        scale = row[f'{long}_DV01'] / row[f'{short}_DV01']
+                        notional = 1_000_000 / (row[f'{long}_DV01'] + scale * row[f'{short}_DV01'])
+                        pos_short = -notional * scale
+                        pos_long = notional
+                        df.loc[i, f'Pos_{short}'] += pos_short
+                        df.loc[i, f'Pos_{long}'] += pos_long
+                        df.loc[i, 'Borrowed'] += 1_000_000
+                        entry_price[pair_key] = (row[f'{short}_PX'], row[f'{long}_PX'])
+                        pair_positions[pair_key] = (pos_short, pos_long)
+                        entry_spread[pair_key] = row[f'{long}_Yld'] - row[f'{short}_Yld']
+                        position_state[pair_key] = True
+
+                    elif z <= -3:
+                        scale = row[f'{long}_DV01'] / row[f'{short}_DV01']
+                        notional = 1_000_000 / (row[f'{long}_DV01'] + scale * row[f'{short}_DV01'])
+                        pos_short = notional * scale
+                        pos_long = -notional
+                        df.loc[i, f'Pos_{short}'] += pos_short
+                        df.loc[i, f'Pos_{long}'] += pos_long
+                        df.loc[i, 'Borrowed'] += 1_000_000
+                        entry_price[pair_key] = (row[f'{short}_PX'], row[f'{long}_PX'])
+                        pair_positions[pair_key] = (pos_short, pos_long)
+                        entry_spread[pair_key] = row[f'{long}_Yld'] - row[f'{short}_Yld']
+                        position_state[pair_key] = True
+
+                else:
+                    current_price = (row[f'{short}_PX'], row[f'{long}_PX'])
+                    pos_short, pos_long = pair_positions[pair_key]
+                    entry_short_px, entry_long_px = entry_price[pair_key]
+                    
+                    # Calculate PnL in bps relative to position size
+                    short_pnl = (current_price[0] - entry_short_px) / entry_short_px * 10_000 * (pos_short / abs(pos_short))
+                    long_pnl = (current_price[1] - entry_long_px) / entry_long_px * 10_000 * (pos_long / abs(pos_long))
+                    pnl_bps = short_pnl + long_pnl
+                    df.loc[i, f'PnL_bps_{pair_key}'] = pnl_bps
+
+                    spread_change = abs((row[f'{long}_Yld'] - row[f'{short}_Yld']) - entry_spread[pair_key]) * 10_000
+
+                    if abs(z) <= 1.5 or abs(pnl_bps) >= bps_stop_loss:
+                        df.loc[i, f'Pos_{short}'] -= pos_short
+                        df.loc[i, f'Pos_{long}'] -= pos_long
+                        position_state[pair_key] = False
+                        pair_positions.pop(pair_key, None)
+                        entry_price.pop(pair_key, None)
+                        entry_spread.pop(pair_key, None)
+
+                    daily_bps_pnl += pnl_bps
+
+                prev_z[pair_key] = z
+
+            df.loc[i, 'Total_bps'] = daily_bps_pnl
+            df.loc[i, 'Cumulative_bps'] = df.loc[i - 1, 'Cumulative_bps'] + daily_bps_pnl if i > 0 else daily_bps_pnl
+
+        except Exception as e:
+            print(f"Error at index {i}: {e}")
+            continue
+
+    output_cols = [f'PnL_bps_{a}_{b}' for a, b in pairs] + [f'Pos_{t}' for t in tenors] + ['Borrowed', 'Total_bps', 'Cumulative_bps']
+    return df[output_cols]
