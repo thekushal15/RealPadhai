@@ -1,3 +1,105 @@
+def debug_single_index(df, tenors, pairs, index_to_test):
+    print(f"\n--- DEBUGGING INDEX {index_to_test} ---")
+    
+    row = df.iloc[index_to_test]
+    
+    position_state = {f"{p[0]}_{p[1]}": False for p in pairs}
+    entry_price = {}
+    pair_positions = {}
+    running_pnl = {f"{p[0]}_{p[1]}": 0.0 for p in pairs}
+    prev_z = {f"{p[0]}_{p[1]}": None for p in pairs}
+
+    daily_pnl = 0.0
+
+    for pair in pairs:
+        short, long = pair
+        key = f"{short}_{long}"
+        print(f"\n-- Checking pair {key} --")
+
+        try:
+            z = row[(f'{short}_Yld', f'{long}_Yld')]
+            print(f"Z-score: {z}")
+        except Exception as e:
+            print(f"ERROR accessing Z for {key}: {e}")
+            continue
+
+        try:
+            short_px = row[f'{short}_PX']
+            long_px = row[f'{long}_PX']
+            print(f"Prices: {short}_PX = {short_px}, {long}_PX = {long_px}")
+        except Exception as e:
+            print(f"ERROR accessing prices: {e}")
+            continue
+
+        try:
+            short_dv01 = row[f'{short}_DV01']
+            long_dv01 = row[f'{long}_DV01']
+            print(f"DV01s: {short} = {short_dv01}, {long} = {long_dv01}")
+        except Exception as e:
+            print(f"ERROR accessing DV01: {e}")
+            continue
+
+        try:
+            scale = long_dv01 / short_dv01
+            notional = 1_000_000 / (long_dv01 + scale * short_dv01)
+            pos_short = -notional * scale if z >= 3 else notional * scale
+            pos_long = notional if z >= 3 else -notional
+            print(f"Calculated scale: {scale}, notional: {notional}")
+            print(f"Position: short = {pos_short}, long = {pos_long}")
+        except Exception as e:
+            print(f"ERROR in position sizing: {e}")
+            continue
+
+        try:
+            if abs(z) <= 1.5:
+                print("Exit condition met: abs(z) <= 1.5")
+            elif z >= 3 or z <= -3:
+                print("Entry condition met: z >= 3 or z <= -3")
+        except Exception as e:
+            print(f"ERROR in signal logic: {e}")
+            continue
+
+        try:
+            # Simulate unrealized PnL calculation
+            entry = (short_px, long_px)
+            current = (short_px + 0.5, long_px - 0.5)
+            pnl = (current[0] - entry[0]) * pos_short + (current[1] - entry[1]) * pos_long
+            print(f"Simulated PnL: {pnl}")
+        except Exception as e:
+            print(f"ERROR in PnL calculation: {e}")
+            continue
+
+        try:
+            # Attempt to update df (optional)
+            df.loc[index_to_test, f'PnL_{key}'] = pnl
+            print(f"Updated df.loc[{index_to_test}, PnL_{key}] = {pnl}")
+        except Exception as e:
+            print(f"ERROR writing to DataFrame: {e}")
+
+    print(f"\n✅ Finished debug for index {index_to_test}")
+
+
+# Example usage after loading and initializing your DataFrame
+index_to_debug = 60
+debug_single_index(df, tenors, pairs, index_to_debug)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import pandas as pd
 import numpy as np
 import itertools
