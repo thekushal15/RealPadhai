@@ -30,6 +30,186 @@ df = pd.concat([df, results_df], axis=1)
 
 
 
+import pandas as pd
+import itertools
+import numpy as np
+
+# Set tenors and pairs
+tenors = ['26', '30', '31', '32', '35', '40']
+pairs = [p for p in itertools.combinations(tenors, 2) if int(p[1]) - int(p[0]) >= 4]
+
+def flatten_columns(df):
+    df.columns = [
+        f"{col[0]}_{col[1]}" if isinstance(col, tuple) else col
+        for col in df.columns
+    ]
+    return df
+
+def initialize_columns(df, tenors, pairs):
+    df['Idx'] = range(len(df))
+    for tenor in tenors:
+        df[f'Pos_{tenor}'] = 0.0
+    for pair in pairs:
+        df[f'PnL_bps_{pair[0]}_{pair[1]}'] = 0.0
+    df['Total_bps'] = 0.0
+    df['Cumulative_bps'] = 0.0
+    df['Total_Trades'] = 0
+    df['Cumm_Trades'] = 0
+    df['Total_Stop_Loss'] = 0
+    df['Cumm_Stop_Loss'] = 0
+    df['Total_Profitable_Trades'] = 0
+    df['Cumm_Profitable_Trades'] = 0
+    df['Total_Loss_Trades'] = 0
+    df['Cumm_Loss_Trades'] = 0
+    return df
+
+def apply_trading_strategy(df, tenors, pairs, use_max_cap=True, max_loss_cap=-10.0, max_stop_loss=5):
+    df = flatten_columns(df)
+    df = initialize_columns(df, tenors, pairs)
+
+    rolling_windows = [10, 20, 25, 30]
+
+    position_state = {f"{a}_{b}": False for a, b in pairs}
+    entry_yield = {}
+    entry_spread = {}
+    pair_positions = {}
+    running_pnl_bps = {f"{a}_{b}": 0.0 for a, b in pairs}
+    prev_z = {f"{a}_{b}": None for a, b in pairs}
+    cumulative_trades = 0
+    cumulative_stop_losses = 0
+    cumulative_profitable_trades = 0
+    cumulative_loss_trades = 0
+
+    # Compute Z-scores for each rolling window
+    for pair in pairs:
+        short, long = pair
+        spread = df[f'{long}_Yld'] - df[f'{short}_Yld']
+        for w in rolling_windows:
+            colname = f'Z_{short}_{long}_w{w}'
+            df[colname] = (spread - spread.rolling(window=w).mean()) / spread.rolling(window=w).std()
+            df[colname] = df[colname].shift(1)
+
+    for i in range(len(df)):
+        try:
+            row = df.iloc[i]
+            daily_pnl_bps = 0.0
+            new_trades = 0
+            new_stop_losses = 0
+            new_profitable_trades = 0
+            new_loss_trades = 0
+
+            for pair in pairs:
+                short, long = pair
+                pair_key = f"{short}_{long}"
+                z_vals = [row.get(f"Z_{short}_{long}_w{w}") for w in rolling_windows]
+                valid_z = [z for z in z_vals if not pd.isna(z)]
+                entry_signal = sum([z >= 2 for z in valid_z]) >= 3
+                exit_signal = any([abs(z) <= 0.75 for z in valid_z])
+
+                if len(valid_z) < 4:
+                    continue
+
+                if not position_state[pair_key]:
+                    if entry_signal:
+                        scale = row[f'{long}_DV01'] / row[f'{short}_DV01']
+                        notional = 1_000_000 / (row[f'{long}_DV01'] + scale * row[f'{short}_DV01'])
+                        pos_short = -notional * scale
+                        pos_long = notional
+                        df.loc[i, f'Pos_{short}'] += pos_short
+                        df.loc[i, f'Pos_{long}'] += pos_long
+                        entry_yield[pair_key] = (row[f'{short}_Yld'], row[f'{long}_Yld'])
+                        entry_spread[pair_key] = entry_yield[pair_key][0] - entry_yield[pair_key][1]
+                        pair_positions[pair_key] = (pos_short, pos_long, scale)
+                        position_state[pair_key] = True
+                        running_pnl_bps[pair_key] = 0.0
+                        new_trades += 1
+                else:
+                    current_yield = (row[f'{short}_Yld'], row[f'{long}_Yld'])
+                    current_spread = current_yield[0] - current_yield[1]
+                    spread_change_bps = (entry_spread[pair_key] - current_spread) * 100
+                    pos_short, pos_long, scale = pair_positions[pair_key]
+                    if pos_long > 0:
+                        pnl_bps = spread_change_bps * abs(pos_long) / 1_000_000
+                    else:
+                        pnl_bps = -spread_change_bps * abs(pos_long) / 1_000_000
+                    running_pnl_bps[pair_key] = pnl_bps
+
+                    stop_loss_threshold = -0.5
+                    max_loss_cap_adjusted = max_loss_cap if use_max_cap else float('-inf')
+
+                    if exit_signal or running_pnl_bps[pair_key] <= max(max_loss_cap_adjusted, stop_loss_threshold):
+                        realized_pnl = running_pnl_bps[pair_key]
+                        df.loc[i, f'PnL_bps_{pair_key}'] = realized_pnl
+                        df.loc[i, f'Pos_{short}'] -= pos_short
+                        df.loc[i, f'Pos_{long}'] -= pos_long
+                        position_state[pair_key] = False
+                        if realized_pnl <= stop_loss_threshold:
+                            new_stop_losses += 1
+                        if realized_pnl > 0:
+                            new_profitable_trades += 1
+                        elif realized_pnl < 0:
+                            new_loss_trades += 1
+                        running_pnl_bps[pair_key] = 0.0
+                        pair_positions.pop(pair_key, None)
+                        entry_yield.pop(pair_key, None)
+                        entry_spread.pop(pair_key, None)
+
+                        if new_stop_losses >= max_stop_loss:
+                            position_state = {k: False for k in position_state}
+                            pair_positions.clear()
+                            entry_yield.clear()
+                            entry_spread.clear()
+                            running_pnl_bps = {f"{a}_{b}": 0.0 for a, b in pairs}
+                            break
+
+                df.loc[i, f'PnL_bps_{pair_key}'] = running_pnl_bps[pair_key]
+                daily_pnl_bps += running_pnl_bps[pair_key]
+                prev_z[pair_key] = valid_z[0]  # for safety, store first window z
+
+            cumulative_trades += new_trades
+            cumulative_stop_losses += new_stop_losses
+            cumulative_profitable_trades += new_profitable_trades
+            cumulative_loss_trades += new_loss_trades
+
+            df.loc[i, 'Total_bps'] = daily_pnl_bps
+            df.loc[i, 'Cumulative_bps'] = daily_pnl_bps if i == 0 else df.loc[i - 1, 'Cumulative_bps'] + daily_pnl_bps
+            df.loc[i, 'Total_Trades'] = new_trades
+            df.loc[i, 'Cumm_Trades'] = cumulative_trades
+            df.loc[i, 'Total_Stop_Loss'] = new_stop_losses
+            df.loc[i, 'Cumm_Stop_Loss'] = cumulative_stop_losses
+            df.loc[i, 'Total_Profitable_Trades'] = new_profitable_trades
+            df.loc[i, 'Cumm_Profitable_Trades'] = cumulative_profitable_trades
+            df.loc[i, 'Total_Loss_Trades'] = new_loss_trades
+            df.loc[i, 'Cumm_Loss_Trades'] = cumulative_loss_trades
+
+        except Exception as e:
+            print(f"Skipped index {i} due to error: {e}")
+            continue
+
+    output_cols = ['Idx'] + [f'Pos_{t}' for t in tenors] + [f'PnL_bps_{a}_{b}' for a, b in pairs] + [
+        'Total_bps', 'Cumulative_bps',
+        'Total_Trades', 'Cumm_Trades',
+        'Total_Stop_Loss', 'Cumm_Stop_Loss',
+        'Total_Profitable_Trades', 'Cumm_Profitable_Trades',
+        'Total_Loss_Trades', 'Cumm_Loss_Trades']
+    return df[output_cols]
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
