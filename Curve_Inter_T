@@ -1,3 +1,44 @@
+# Define yield columns
+yield_columns = ['26_Yld', '30_Yld', '31_Yld', '32_Yld', '35_Yld', '36_Yld', '37_Yld', '40_Yld', '41_Yld']
+
+# Generate all possible yield spread pairs (longer maturity - shorter maturity)
+pairs = [(col1, col2) for i, col1 in enumerate(yield_columns) for col2 in yield_columns[i+1:]]
+
+# Function to calculate Z-score with any rolling window
+def calculate_z_score(series, window):
+    rolling_mean = series.rolling(window=window).mean()
+    rolling_std = series.rolling(window=window).std()
+    z_score = (series - rolling_mean) / rolling_std
+    return z_score
+
+# Rolling windows to use
+rolling_windows = [10, 20, 25, 30]
+
+# Dictionary to store results
+results = {}
+
+# Calculate spreads and Z-scores for each pair
+for short_col, long_col in pairs:
+    spread = df[long_col] - df[short_col]  # Long - Short
+    for w in rolling_windows:
+        z_col_name = f'Z_{short_col.split("_")[0]}_{long_col.split("_")[0]}_w{w}'
+        results[z_col_name] = calculate_z_score(spread, window=w).shift(1)
+
+# Merge with main dataframe
+results_df = pd.DataFrame(results, index=df.index)
+df = pd.concat([df, results_df], axis=1)
+
+
+
+
+
+
+
+
+
+
+
+
 import pandas as pd
 import itertools
 import numpy as np
