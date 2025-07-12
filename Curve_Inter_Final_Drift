@@ -81,8 +81,15 @@ def apply_trading_strategy(df, tenors, pairs, use_max_cap=True, max_loss_cap=100
     pair_positions = {}
     running_pnl_bps = {f"{a}_{b}": 0.0 for a, b in pairs}
     prev_z = {f"{a}_{b}": None for a, b in pairs}
-    banned = False
 
+def trading_strategy(df, pairs, tenors, drift_threshold, flattening_drift_threshold, steepening_drift_threshold, max_loss_cap, use_max_cap):
+    position_state = {f"{pair[0]}_{pair[1]}": False for pair in pairs}
+    running_pnl_bps = {f"{pair[0]}_{pair[1]}": 0.0 for pair in pairs}
+    pair_positions = {}
+    entry_yield = {}
+    entry_spread = {}
+    prev_z = {}
+    bet_type = {}  # New dictionary to track steepening/flattening bets
     cumulative_trades = 0
     cumulative_stop_losses = 0
     cumulative_profitable_trades = 0
@@ -98,20 +105,29 @@ def apply_trading_strategy(df, tenors, pairs, use_max_cap=True, max_loss_cap=100
             new_loss_trades = 0
 
             # Check for regime shift using rolling drift
-            drift_triggered = False
+            drift_triggered = {pair_key: False for pair_key in position_state}
             for pair in pairs:
+                pair_key = f"{pair[0]}_{pair[1]}"
                 ma5 = row[f'MA5_{pair[0]}_{pair[1]}']
                 ma20 = row[f'MA20_{pair[0]}_{pair[1]}']
                 if pd.notna(ma5) and pd.notna(ma20):
-                    if abs(ma5 - ma20) > drift_threshold:
-                        drift_triggered = True
-                        break
+                    # Check flattening drift for flattener bets
+                    if bet_type.get(pair_key) == 'flattening' and (ma5 - ma20) > flattening_drift_threshold:
+                        drift_triggered[pair_key] = True
+                    # Check steepening drift for steepener bets
+                    elif bet_type.get(pair_key) == 'steepening' and (ma20 - ma5) > steepening_drift_threshold:
+                        drift_triggered[pair_key] = True
+                    # Check general drift threshold for unclassified/new positions
+                    elif (ma5 - ma20) > drift_threshold or (ma20 - ma5) > drift_threshold:
+                        drift_triggered[pair_key] = True
 
-            if drift_triggered:
-                banned = True
-                # Close all open positions
-                for pair in pairs:
-                    pair_key = f"{pair[0]}_{pair[1]}"
+            for pair in pairs:
+                pair_key = f"{pair[0]}_{pair[1]}"
+                z_col = f"{pair[0]}_Yld_{pair[1]}_Yld"
+                z = row.get(z_col, np.nan)
+
+                # If drift is triggered for this pair, close positions and ban new trades
+                if drift_triggered[pair_key]:
                     if position_state[pair_key]:
                         pos_short, pos_long, _ = pair_positions[pair_key]
                         df.loc[i, f'PnL_bps_{pair_key}'] = running_pnl_bps[pair_key]
@@ -122,20 +138,22 @@ def apply_trading_strategy(df, tenors, pairs, use_max_cap=True, max_loss_cap=100
                         pair_positions.pop(pair_key, None)
                         entry_yield.pop(pair_key, None)
                         entry_spread.pop(pair_key, None)
-                continue
-            else:
-                banned = False
-
-            for pair in pairs:
-                pair_key = f"{pair[0]}_{pair[1]}"
-                z_col = f"{pair[0]}_Yld_{pair[1]}_Yld"
-                z = row.get(z_col, np.nan)
+                        bet_type.pop(pair_key, None)
+                    continue
 
                 if pd.isna(z):
                     continue
 
+                # Check if drift is within threshold to lift trade ban
+                banned = False
+                if pd.notna(ma5) and pd.notna(ma20):
+                    if (bet_type.get(pair_key) == 'flattening' and (ma5 - ma20) > flattening_drift_threshold) or \
+                       (bet_type.get(pair_key) == 'steepening' and (ma20 - ma5) > steepening_drift_threshold):
+                        banned = True
+
                 if not position_state[pair_key] and not banned:
                     if z >= 2.1:
+                        # Flattener trade (z >= 2.1)
                         scale = row[f"{pair[1]}_DV01"] / row[f"{pair[0]}_DV01"]
                         notional = 1_000_000 / (row[f"{pair[1]}_DV01"] + scale * row[f"{pair[0]}_DV01"])
                         pos_short = -notional * scale
@@ -147,9 +165,11 @@ def apply_trading_strategy(df, tenors, pairs, use_max_cap=True, max_loss_cap=100
                         pair_positions[pair_key] = (pos_short, pos_long, scale)
                         position_state[pair_key] = True
                         running_pnl_bps[pair_key] = 0.0
+                        bet_type[pair_key] = 'flattening'  # Record bet type
                         new_trades += 1
                     elif z <= -2.1:
-                        scale = row[f"{pair[0]}_DV01"] / row[f"{pair[1]}_DV01"]
+                        # Steepener trade (z <= -2.1)
+                        scale = row[f"{pair[0]}_DV01"] / row[f"{pair[1]}_-DV01"]
                         notional = 1_000_000 / (row[f"{pair[0]}_DV01"] + scale * row[f"{pair[1]}_DV01"])
                         pos_short = -notional
                         pos_long = notional * scale
@@ -160,6 +180,7 @@ def apply_trading_strategy(df, tenors, pairs, use_max_cap=True, max_loss_cap=100
                         pair_positions[pair_key] = (pos_short, pos_long, scale)
                         position_state[pair_key] = True
                         running_pnl_bps[pair_key] = 0.0
+                        bet_type[pair_key] = 'steepening'  # Record bet type
                         new_trades += 1
                 elif position_state[pair_key]:
                     current_yield = (row[f"{pair[0]}_Yld"], row[f"{pair[1]}_Yld"])
@@ -191,6 +212,7 @@ def apply_trading_strategy(df, tenors, pairs, use_max_cap=True, max_loss_cap=100
                         pair_positions.pop(pair_key, None)
                         entry_yield.pop(pair_key, None)
                         entry_spread.pop(pair_key, None)
+                        bet_type.pop(pair_key, None)
 
                 df.loc[i, f'PnL_bps_{pair_key}'] = running_pnl_bps[pair_key]
                 daily_pnl_bps += running_pnl_bps[pair_key]
