@@ -1,0 +1,109 @@
+# Function to calculate Z-score
+def calculate_z_score(series, window=20):
+    rolling_mean = series.rolling(window=window).mean()
+    rolling_std = series.rolling(window=window).std()
+    z_score = (series - rolling_mean) / rolling_std
+    return z_score
+
+# Calculate spreads and Z-scores for each pair with two different windows
+results_20 = {}
+results_50 = {}
+for pair in pairs:
+    spread = df[pair[1]] - df[pair[0]]  # Longer maturity - shorter maturity
+    results_20[f"{pair[0]}_{pair[1]}_z20"] = calculate_z_score(spread, window=20).shift(1)
+    results_50[f"{pair[0]}_{pair[1]}_z50"] = calculate_z_score(spread, window=50).shift(1)
+
+# Create DataFrames for each set of Z-scores
+df_spd_20 = pd.DataFrame(results_20, index=df.index)
+df_spd_50 = pd.DataFrame(results_50, index=df.index)
+
+# Concatenate both DataFrames with the original DataFrame
+df = pd.concat([df, df_spd_20, df_spd_50], axis=1)
+
+
+import matplotlib.pyplot as plt
+import pandas as pd
+
+def plot_z_scores(df, pairs, year=None, start_date=None, end_date=None, window1=20, window2=50):
+    """
+    Plot Z20 and Z50 scores for each pair on the same graph.
+    
+    Parameters:
+    - df: DataFrame containing the Z-score columns
+    - pairs: List of tuples containing pairs (e.g., [('2Y', '10Y'), ('5Y', '30Y')])
+    - year: Integer year to filter data (optional)
+    - start_date: String start date in 'YYYY-MM-DD' format (optional)
+    - end_date: String end date in 'YYYY-MM-DD' format (optional)
+    - window1: First rolling window size (default: 20)
+    - window2: Second rolling window size (default: 50)
+    """
+    # Filter data based on year or date range
+    if year:
+        df_filtered = df[df.index.year == year]
+    elif start_date and end_date:
+        df_filtered = df.loc[start_date:end_date]
+    else:
+        df_filtered = df
+
+    # Create plots for each pair
+    for pair in pairs:
+        col_z20 = f"{pair[0]}_{pair[1]}_z20"
+        col_z50 = f"{pair[0]}_{pair[1]}_z50"
+        
+        if col_z20 in df_filtered.columns and col_z50 in df_filtered.columns:
+            plt.figure(figsize=(12, 6))
+            plt.plot(df_filtered.index, df_filtered[col_z20], label=f'Z-score ({window1}-period)', color='blue')
+            plt.plot(df_filtered.index, df_filtered[col_z50], label=f'Z-score ({window2}-period)', color='red')
+            plt.title(f'Z-scores for {pair[0]}-{pair[1]} Pair')
+            plt.xlabel('Date')
+            plt.ylabel('Z-score')
+            plt.legend()
+            plt.grid(True)
+            plt.xticks(rotation=45)
+            plt.tight_layout()
+            plt.show()
+        else:
+            print(f"Z-score columns for pair {pair} not found in DataFrame")
+
+def plot_z_score_spread(df, pairs, year=None, start_date=None, end_date=None, window1=20, window2=50):
+    """
+    Plot the spread between Z20 and Z50 scores for each pair.
+    
+    Parameters:
+    - df: DataFrame containing the Z-score columns
+    - pairs: List of tuples containing pairs (e.g., [('2Y', '10Y'), ('5Y', '30Y')])
+    - year: Integer year to filter data (optional)
+    - start_date: String start date in 'YYYY-MM-DD' format (optional)
+    - end_date: String end date in 'YYYY-MM-DD' format (optional)
+    - window1: First rolling window size (default: 20)
+    - window2: Second rolling window size (default: 50)
+    """
+    # Filter data based on year or date range
+    if year:
+        df_filtered = df[df.index.year == year]
+    elif start_date and end_date:
+        df_filtered = df.loc[start_date:end_date]
+    else:
+        df_filtered = df
+
+    # Create plots for each pair
+    for pair in pairs:
+        col_z20 = f"{pair[0]}_{pair[1]}_z20"
+        col_z50 = f"{pair[0]}_{pair[1]}_z50"
+        
+        if col_z20 in df_filtered.columns and col_z50 in df_filtered.columns:
+            # Calculate the spread between Z20 and Z50
+            spread = df_filtered[col_z20] - df_filtered[col_z50]
+            
+            plt.figure(figsize=(12, 6))
+            plt.plot(df_filtered.index, spread, label=f'Z{window1} - Z{window2} Spread', color='green')
+            plt.title(f'Z-score Spread ({window1} vs {window2}) for {pair[0]}-{pair[1]} Pair')
+            plt.xlabel('Date')
+            plt.ylabel('Z-score Spread')
+            plt.legend()
+            plt.grid(True)
+            plt.xticks(rotation=45)
+            plt.tight_layout()
+            plt.show()
+        else:
+            print(f"Z-score columns for pair {pair} not found in DataFrame")
