@@ -1,0 +1,229 @@
+# Get all yield columns
+yield_columns = ['26_Yld', '30_Yld', '31_Yld', '32_Yld', '35_Yld', '36_Yld', '37_Yld', '40_Yld', '41_Yld']
+
+# Generate all possible yield pairs (short, long)
+pairs = [(col1, col2) for i, col1 in enumerate(yield_columns) for col2 in yield_columns[i+1:]]
+
+# Initialize dictionaries to store rolling means
+ma20_cols = {}
+ma5_cols = {}
+
+# Loop through each pair to compute spreads and rolling means
+for short_yld, long_yld in pairs:
+    spread = df[long_yld] - df[short_yld]  # Spread = Long - Short
+    pair_name = f"{short_yld.split('_')[0]}_{long_yld.split('_')[0]}"  # e.g., 26_30
+
+    # Calculate rolling means
+    ma20 = spread.rolling(window=20).mean()
+    ma5 = spread.rolling(window=5).mean()
+
+    # Store in dictionary
+    ma20_cols[f"MA20_{pair_name}"] = ma20
+    ma5_cols[f"MA5_{pair_name}"] = ma5
+
+# Create DataFrames
+ma20_df = pd.DataFrame(ma20_cols)
+ma5_df = pd.DataFrame(ma5_cols)
+
+# Concatenate to original df
+df = pd.concat([df, ma20_df, ma5_df], axis=1)
+
+
+
+
+
+# Set tenors and pairs
+import pandas as pd
+import numpy as np
+import itertools
+
+# Example yield column format: 26_Yld, 30_Yld, etc.
+tenors = ['26', '30', '31', '32', '35', '40']
+pairs = list(itertools.combinations(tenors, 2))
+
+
+
+
+def flatten_columns(df):
+    df.columns = [
+        f"{col[0]}_{col[1]}" if isinstance(col, tuple) else col
+        for col in df.columns
+    ]
+    return df
+
+def initialize_columns(df, tenors, pairs):
+    df['Idx'] = range(len(df))
+    for tenor in tenors:
+        df[f'Pos_{tenor}'] = 0.0
+    for pair in pairs:
+        df[f'PnL_bps_{pair[0]}_{pair[1]}'] = 0.0
+        df[f'MA20_{pair[0]}_{pair[1]}'] = (df[f'{pair[1]}_Yld'] - df[f'{pair[0]}_Yld']).rolling(20).mean()
+        df[f'MA5_{pair[0]}_{pair[1]}'] = (df[f'{pair[1]}_Yld'] - df[f'{pair[0]}_Yld']).rolling(5).mean()
+    df['Total_bps'] = 0.0
+    df['Cumulative_bps'] = 0.0
+    df['Total_Trades'] = 0
+    df['Cumm_Trades'] = 0
+    df['Total_Stop_Loss'] = 0
+    df['Cumm_Stop_Loss'] = 0
+    df['Total_Profitable_Trades'] = 0
+    df['Cumm_Profitable_Trades'] = 0
+    df['Total_Loss_Trades'] = 0
+    df['Cumm_Loss_Trades'] = 0
+    return df
+
+def apply_trading_strategy(df, tenors, pairs, use_max_cap=True, max_loss_cap=100000.0, max_stop_loss=5, drift_threshold=0.8):
+    df = flatten_columns(df)
+    df = initialize_columns(df, tenors, pairs)
+
+    position_state = {f"{a}_{b}": False for a, b in pairs}
+    entry_yield = {}
+    entry_spread = {}
+    pair_positions = {}
+    running_pnl_bps = {f"{a}_{b}": 0.0 for a, b in pairs}
+    prev_z = {f"{a}_{b}": None for a, b in pairs}
+    banned = False
+
+    cumulative_trades = 0
+    cumulative_stop_losses = 0
+    cumulative_profitable_trades = 0
+    cumulative_loss_trades = 0
+
+    for i in range(len(df)):
+        try:
+            row = df.iloc[i]
+            daily_pnl_bps = 0.0
+            new_trades = 0
+            new_stop_losses = 0
+            new_profitable_trades = 0
+            new_loss_trades = 0
+
+            # Check for regime shift using rolling drift
+            drift_triggered = False
+            for pair in pairs:
+                ma5 = row[f'MA5_{pair[0]}_{pair[1]}']
+                ma20 = row[f'MA20_{pair[0]}_{pair[1]}']
+                if pd.notna(ma5) and pd.notna(ma20):
+                    if abs(ma5 - ma20) > drift_threshold:
+                        drift_triggered = True
+                        break
+
+            if drift_triggered:
+                banned = True
+                # Close all open positions
+                for pair in pairs:
+                    pair_key = f"{pair[0]}_{pair[1]}"
+                    if position_state[pair_key]:
+                        pos_short, pos_long, _ = pair_positions[pair_key]
+                        df.loc[i, f'PnL_bps_{pair_key}'] = running_pnl_bps[pair_key]
+                        df.loc[i, f'Pos_{pair[0]}'] -= pos_short
+                        df.loc[i, f'Pos_{pair[1]}'] -= pos_long
+                        running_pnl_bps[pair_key] = 0.0
+                        position_state[pair_key] = False
+                        pair_positions.pop(pair_key, None)
+                        entry_yield.pop(pair_key, None)
+                        entry_spread.pop(pair_key, None)
+                continue
+            else:
+                banned = False
+
+            for pair in pairs:
+                pair_key = f"{pair[0]}_{pair[1]}"
+                z_col = f"{pair[0]}_Yld_{pair[1]}_Yld"
+                z = row.get(z_col, np.nan)
+
+                if pd.isna(z):
+                    continue
+
+                if not position_state[pair_key] and not banned:
+                    if z >= 2.1:
+                        scale = row[f"{pair[1]}_DV01"] / row[f"{pair[0]}_DV01"]
+                        notional = 1_000_000 / (row[f"{pair[1]}_DV01"] + scale * row[f"{pair[0]}_DV01"])
+                        pos_short = -notional * scale
+                        pos_long = notional
+                        df.loc[i, f'Pos_{pair[0]}'] += pos_short
+                        df.loc[i, f'Pos_{pair[1]}'] += pos_long
+                        entry_yield[pair_key] = (row[f"{pair[0]}_Yld"], row[f"{pair[1]}_Yld"])
+                        entry_spread[pair_key] = entry_yield[pair_key][0] - entry_yield[pair_key][1]
+                        pair_positions[pair_key] = (pos_short, pos_long, scale)
+                        position_state[pair_key] = True
+                        running_pnl_bps[pair_key] = 0.0
+                        new_trades += 1
+                    elif z <= -2.1:
+                        scale = row[f"{pair[0]}_DV01"] / row[f"{pair[1]}_DV01"]
+                        notional = 1_000_000 / (row[f"{pair[0]}_DV01"] + scale * row[f"{pair[1]}_DV01"])
+                        pos_short = -notional
+                        pos_long = notional * scale
+                        df.loc[i, f'Pos_{pair[0]}'] += pos_short
+                        df.loc[i, f'Pos_{pair[1]}'] += pos_long
+                        entry_yield[pair_key] = (row[f"{pair[0]}_Yld"], row[f"{pair[1]}_Yld"])
+                        entry_spread[pair_key] = entry_yield[pair_key][0] - entry_yield[pair_key][1]
+                        pair_positions[pair_key] = (pos_short, pos_long, scale)
+                        position_state[pair_key] = True
+                        running_pnl_bps[pair_key] = 0.0
+                        new_trades += 1
+                elif position_state[pair_key]:
+                    current_yield = (row[f"{pair[0]}_Yld"], row[f"{pair[1]}_Yld"])
+                    current_spread = current_yield[0] - current_yield[1]
+                    spread_change_bps = (entry_spread[pair_key] - current_spread) * 100
+                    pos_short, pos_long, _ = pair_positions[pair_key]
+                    if pos_long > 0:
+                        pnl_bps = spread_change_bps * abs(pos_long) / 1_000_000
+                    else:
+                        pnl_bps = -spread_change_bps * abs(pos_long) / 1_000_000
+                    running_pnl_bps[pair_key] += pnl_bps
+
+                    stop_loss_threshold = -1
+                    max_loss_cap_adjusted = max_loss_cap if use_max_cap else float('-inf')
+
+                    if abs(z) < 0.05 or running_pnl_bps[pair_key] <= max(max_loss_cap_adjusted, stop_loss_threshold):
+                        realized_pnl = running_pnl_bps[pair_key]
+                        df.loc[i, f'PnL_bps_{pair_key}'] = realized_pnl
+                        df.loc[i, f'Pos_{pair[0]}'] -= pos_short
+                        df.loc[i, f'Pos_{pair[1]}'] -= pos_long
+                        position_state[pair_key] = False
+                        if running_pnl_bps[pair_key] <= stop_loss_threshold:
+                            new_stop_losses += 1
+                        if realized_pnl > 0:
+                            new_profitable_trades += 1
+                        elif realized_pnl < 0:
+                            new_loss_trades += 1
+                        running_pnl_bps[pair_key] = 0.0
+                        pair_positions.pop(pair_key, None)
+                        entry_yield.pop(pair_key, None)
+                        entry_spread.pop(pair_key, None)
+
+                df.loc[i, f'PnL_bps_{pair_key}'] = running_pnl_bps[pair_key]
+                daily_pnl_bps += running_pnl_bps[pair_key]
+                prev_z[pair_key] = z
+
+            cumulative_trades += new_trades
+            cumulative_stop_losses += new_stop_losses
+            cumulative_profitable_trades += new_profitable_trades
+            cumulative_loss_trades += new_loss_trades
+
+            df.loc[i, 'Total_bps'] = daily_pnl_bps
+            df.loc[i, 'Cumulative_bps'] = daily_pnl_bps if i == 0 else df.loc[i - 1, 'Cumulative_bps'] + daily_pnl_bps
+            df.loc[i, 'Total_Trades'] = new_trades
+            df.loc[i, 'Cumm_Trades'] = cumulative_trades
+            df.loc[i, 'Total_Stop_Loss'] = new_stop_losses
+            df.loc[i, 'Cumm_Stop_Loss'] = cumulative_stop_losses
+            df.loc[i, 'Total_Profitable_Trades'] = new_profitable_trades
+            df.loc[i, 'Cumm_Profitable_Trades'] = cumulative_profitable_trades
+            df.loc[i, 'Total_Loss_Trades'] = new_loss_trades
+            df.loc[i, 'Cumm_Loss_Trades'] = cumulative_loss_trades
+
+        except Exception as e:
+            print(f"Skipped index {i} due to error: {e}")
+            continue
+
+    output_cols = ['Idx'] + [f'Pos_{t}' for t in tenors] + [f'PnL_bps_{a}_{b}' for a, b in pairs] + ['Total_bps', 'Cumulative_bps',
+                                                                 'Total_Trades', 'Cumm_Trades',
+                                                                 'Total_Stop_Loss', 'Cumm_Stop_Loss',
+                                                                 'Total_Profitable_Trades', 'Cumm_Profitable_Trades',
+                                                                 'Total_Loss_Trades', 'Cumm_Loss_Trades']
+    return df[output_cols]
+
+# Assuming df has been prepared externally with yield columns and DV01s loaded
+# df = pd.read_csv("your_file.csv")
+# result_df = apply_trading_strategy(df, tenors, pairs, use_max_cap=True)
+# print(result_df)
