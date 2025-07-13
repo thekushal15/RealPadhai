@@ -1,3 +1,92 @@
+import pandas as pd
+import numpy as np
+from scipy.spatial.distance import cdist
+from sklearn.preprocessing import StandardScaler
+from scipy.signal import detrend
+
+def dtw_distance(s1, s2, window=10):
+    """Compute Dynamic Time Warping distance between two series."""
+    n, m = len(s1), len(s2)
+    cost_matrix = np.zeros((n, m))
+    cost_matrix[0, 0] = abs(s1[0] - s2[0])
+    for i in range(1, n):
+        cost_matrix[i, 0] = cost_matrix[i-1, 0] + abs(s1[i] - s2[0])
+    for j in range(1, m):
+        cost_matrix[0, j] = cost_matrix[0, j-1] + abs(s1[0] - s2[j])
+    for i in range(1, n):
+        for j in range(1, m):
+            choices = cost_matrix[i-1, j], cost_matrix[i, j-1], cost_matrix[i-1, j-1]
+            cost_matrix[i, j] = min(choices) + abs(s1[i] - s2[j])
+    return cost_matrix[n-1, m-1] / (n + m)
+
+def convergence_indicator(df, col1, col2, window=20, amplify_factor=2.0):
+    """Generate a research-level convergence indicator."""
+    # Detrend and standardize the series
+    scaler = StandardScaler()
+    series1 = detrend(df[col1].values)
+    series2 = detrend(df[col2].values)
+    series1 = scaler.fit_transform(series1.reshape(-1, 1)).flatten()
+    series2 = scaler.fit_transform(series2.reshape(-1, 1)).flatten()
+
+    # Compute rolling rate of change
+    roc1 = pd.Series(series1).pct_change().rolling(window).mean()
+    roc2 = pd.Series(series2).pct_change().rolling(window).mean()
+
+    # Rolling correlation as coherence measure
+    correlation = pd.Series(series1).rolling(window).corr(pd.Series(series2)).fillna(0)
+
+    # DTW-based synchronization score
+    dtw_scores = [dtw_distance(series1[i-window:i], series2[i-window:i]) if i >= window else np.nan 
+                  for i in range(len(series1))]
+    dtw_scores = pd.Series(dtw_scores).fillna(method='bfill').fillna(method='ffill')
+    sync_score = 1 / (1 + dtw_scores)  # Inverse DTW as sync measure
+
+    # Amplified indicator
+    indicator = pd.Series(np.zeros(len(df)), index=df.index)
+    for i in range(window, len(df)):
+        if roc1[i] > 0 and roc2[i] > 0:  # Both upward
+            coherence = correlation[i]
+            amp = amplify_factor * coherence * sync_score[i]
+            indicator[i] = amp * (roc1[i] + roc2[i]) / 2
+        elif roc1[i] < 0 and roc2[i] < 0:  # Both downward
+            coherence = correlation[i]
+            amp = amplify_factor * coherence * sync_score[i]
+            indicator[i] = amp * (roc1[i] + roc2[i]) / 2
+        else:  # No sync or opposite movement
+            indicator[i] = 0.0
+
+    # Smooth the indicator
+    indicator = indicator.rolling(window=5).mean().fillna(0)
+
+    df['Convergence_Indicator'] = indicator
+    return df
+
+# Example usage (replace with your DataFrame and column names)
+if __name__ == "__main__":
+    # Sample data
+    dates = pd.date_range(start="2025-01-01", periods=100, freq='D')
+    df = pd.DataFrame({
+        'Series_A': np.random.normal(0, 1, 100).cumsum(),
+        'Series_B': np.random.normal(0, 1, 100).cumsum()
+    }, index=dates)
+    df = convergence_indicator(df, 'Series_A', 'Series_B')
+    print(df[['Series_A', 'Series_B', 'Convergence_Indicator']].tail())
+
+
+
+
+import matplotlib.pyplot as plt
+df[['Series_A', 'Series_B', 'Convergence_Indicator']].plot(figsize=(10, 6))
+plt.show()
+
+
+
+
+
+
+
+
+
 # Function to calculate Z-score
 def calculate_z_score(series, window=20):
     rolling_mean = series.rolling(window=window).mean()
