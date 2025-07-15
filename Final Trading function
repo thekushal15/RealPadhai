@@ -81,7 +81,7 @@ def apply_trading_strategy(df, tenors, pairs, entry_signal=2.1, exit=0.75, patie
                     days_in_position[pair_key] += 1
                     current_yield = (row[f"{short}_Yld"], row[f"{long}_Yld"])
                     current_spread = current_yield[1] - current_yield[0]
-                    benchmark_z = (current_spread - benchmark[pair_key]["mean"]) / benchmark[pair_key]["std"]
+                    benchmark_z = (current_spread - benchmark[pair_key]["mean"]) / benchmark[pair_key]["std"] if benchmark[pair_key]["std"] != 0 else 0
                     if abs(benchmark_z) > patience:
                         benchmark[pair_key]["mean"] = current_spread
                     daily_pnl_bps += (entry_spread[pair_key] - current_spread) * 100 if position_state[pair_key] == 1 else (current_spread - entry_spread[pair_key]) * 100
