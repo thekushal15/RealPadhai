@@ -32,6 +32,8 @@ def apply_trading_strategy(df, tenors, pairs, entry_signal=2.1, exit=0.75, patie
     days_in_position = {f"{a}_{b}": 0 for a, b in pairs}
     FX_indicator = 0
 
+    trade_execution_cost = 0
+    bo_cost = 0
     daily_trades = 0
     daily_stop_losses = 0
     daily_profitable_trades = 0
@@ -61,11 +63,9 @@ def apply_trading_strategy(df, tenors, pairs, entry_signal=2.1, exit=0.75, patie
             for pair in pairs:
                 short, long = pair
                 pair_key = f"{short}_{long}"
-                z_col = f"{short}_Yld({long}_Yld)"
-                mean_col = f"{pair_key}_mean"
-                std_col = f"{pair_key}_std"
-                mean_col = f"({short} + 'Yld', {long} + '_Yld')_mean"
-                std_col = f"({short} + '_Yld', {long} + '_Yld')_std"
+                z_col = f"({short}_Yld, {long}_Yld)"
+                mean_col = f"({short}_Yld, {long}_Yld)_mean"
+                std_col = f"({short}_Yld, {long}_Yld)_std"
 
                 z = row[z_col]
                 if pd.isna(z):
@@ -142,7 +142,7 @@ def apply_trading_strategy(df, tenors, pairs, entry_signal=2.1, exit=0.75, patie
                         position_state[pair_key] = -1
 
                 prev_z[pair_key] = z
-                df.loc[i, f"running_pnl_bps_{pair_key}"] = running_pnl_bps[pair_key]
+                df.loc[i, f"Pnl_bps_{pair_key}"] = running_pnl_bps[pair_key]
 
             # Daily calculations
             df.loc[i, "daily_running_pnl"] = sum(running_pnl_bps.values())
@@ -191,7 +191,7 @@ def apply_trading_strategy(df, tenors, pairs, entry_signal=2.1, exit=0.75, patie
     print("Total Profitable Trades:", cumulative_profitable_trades)
     print("Total Loss Making Trades:", cumulative_loss_trades)
     print("Total Stop Losses Triggered:", cumulative_stop_losses)
-    output_cols = ["Idx"] + [f"Pos_{t}" for t in tenors] + [f"Pnl_bps_{a}_{b}" for a, b in pairs] + ["Total_bps", "cumulative_bps",
+    output_cols = ["Idx"] + [f"Pos_{tenor}" for tenor in tenors] + [f"Pnl_bps_{a}_{b}" for a, b in pairs] + ["Total_bps", "cumulative_bps",
                   "Total_Trades", "cumm_Trades", "Total_Stop_Loss", "cumm_Stop_Loss",
                   "Total_Profitable_Trades", "cumm_Profitable_Trades",
                   "Total_Loss_Trades", "cumm_Loss_Trades", "Trading_cost"]
